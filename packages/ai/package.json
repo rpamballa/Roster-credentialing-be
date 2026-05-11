@@ -1,0 +1,31 @@
+{
+  "name": "@cred/ai",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts",
+    "./classifier": "./src/classifier.ts",
+    "./extractors": "./src/extractors/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cred/config": "workspace:*",
+    "@cred/db": "workspace:*",
+    "@cred/observability": "workspace:*",
+    "@cred/types": "workspace:*",
+    "@anthropic-ai/sdk": "0.39.0",
+    "drizzle-orm": "0.36.4",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}

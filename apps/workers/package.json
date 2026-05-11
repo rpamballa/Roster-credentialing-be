@@ -1,0 +1,33 @@
+{
+  "name": "@cred/workers",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/worker.js",
+  "scripts": {
+    "dev": "tsx watch src/worker.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/worker.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cred/ai": "workspace:*",
+    "@cred/auth": "workspace:*",
+    "@cred/config": "workspace:*",
+    "@cred/db": "workspace:*",
+    "@cred/observability": "workspace:*",
+    "@cred/storage": "workspace:*",
+    "@cred/types": "workspace:*",
+    "@temporalio/activity": "1.11.5",
+    "drizzle-orm": "0.36.4",
+    "@temporalio/client": "1.11.5",
+    "@temporalio/worker": "1.11.5",
+    "@temporalio/workflow": "1.11.5"
+  },
+  "devDependencies": {
+    "tsx": "4.19.2",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "name": "@cred/observability",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./audit": "./src/audit.ts",
+    "./logger": "./src/logger.ts",
+    "./otel": "./src/otel.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cred/config": "workspace:*",
+    "@cred/db": "workspace:*",
+    "@cred/types": "workspace:*",
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/sdk-node": "0.55.0",
+    "@opentelemetry/auto-instrumentations-node": "0.53.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.55.0",
+    "@opentelemetry/resources": "1.28.0",
+    "@opentelemetry/semantic-conventions": "1.28.0",
+    "pino": "9.5.0"
+  },
+  "devDependencies": {
+    "typescript": "5.7.2"
+  }
+}
