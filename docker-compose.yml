@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: cred
       POSTGRES_DB: cred
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./infrastructure/docker/postgres-init:/docker-entrypoint-initdb.d:ro
