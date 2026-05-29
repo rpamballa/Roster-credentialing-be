@@ -12,7 +12,7 @@
   },
   "scripts": {
     "generate": "drizzle-kit generate",
-    "migrate": "tsx src/migrate.ts",
+    "migrate": "node --env-file=../../.env --import tsx src/migrate.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

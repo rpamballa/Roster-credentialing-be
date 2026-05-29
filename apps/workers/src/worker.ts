@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { env } from "@cred/config";
 import { logger, shutdownOtel, startOtel } from "@cred/observability";
@@ -18,7 +19,12 @@ async function main(): Promise<void> {
     connection,
     namespace: cfg.TEMPORAL_NAMESPACE,
     taskQueue: cfg.TEMPORAL_TASK_QUEUE,
-    workflowsPath: fileURLToPath(new URL("./workflows/index.js", import.meta.url)),
+    // In dev (tsx) we point Temporal's webpack bundler at the .ts source;
+    // in prod (compiled) we point at the emitted .js file.
+    workflowsPath: (() => {
+      const js = fileURLToPath(new URL("./workflows/index.js", import.meta.url));
+      return existsSync(js) ? js : fileURLToPath(new URL("./workflows/index.ts", import.meta.url));
+    })(),
     activities: {
       ...pingActivities,
       ...extractionActivities,

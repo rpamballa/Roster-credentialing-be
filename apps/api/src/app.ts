@@ -6,6 +6,10 @@ import { sessionLoader } from "./middleware/session.js";
 import { requireTenancy } from "./middleware/tenancy.js";
 import { attestationRoutes } from "./routes/attestations.js";
 import { authRoutes } from "./routes/auth.js";
+import { cockpitCaseRoutes } from "./routes/cockpitCases.js";
+import { cockpitFacilityRoutes } from "./routes/cockpitFacilities.js";
+import { cockpitOutreachRoutes } from "./routes/cockpitOutreach.js";
+import { cockpitProviderRoutes } from "./routes/cockpitProviders.js";
 import { graphqlHandler } from "./routes/graphql.js";
 import { healthRoutes } from "./routes/health.js";
 import { meRoutes } from "./routes/me.js";
@@ -38,6 +42,13 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", attestationRoutes);
   app.route("/", packetRoutes);
   app.route("/", metricsRoutes);
+
+  // Cockpit REST surface. Each sub-router applies requireStaffAuth +
+  // requireTenancy on the `/v1/cockpit/*` prefix itself.
+  app.route("/", cockpitCaseRoutes);
+  app.route("/", cockpitOutreachRoutes);
+  app.route("/", cockpitFacilityRoutes);
+  app.route("/", cockpitProviderRoutes);
 
   // Cockpit GraphQL requires a staff session + workspace tenancy.
   app.use("/graphql", requireTenancy);
