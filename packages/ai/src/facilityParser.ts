@@ -1,3 +1,4 @@
+import type Anthropic from "@anthropic-ai/sdk";
 import type { FacilityRequirements } from "@cred/types";
 import { DOCUMENT_TYPES, VERIFICATION_TYPES } from "@cred/types/domain";
 import { z } from "zod";
@@ -83,24 +84,58 @@ Rules:
 - Bounding boxes are normalized to [0,1] page coordinates.`;
 
 export interface FacilityParseParams {
-  packetImageUrls: string[];
+  /** Image URLs — used for image-based packets (one per page). Mutually
+   *  compatible with `packetDocument`; both can be provided. */
+  packetImageUrls?: string[];
+  /** PDF supplied as base64 + media type. Anthropic processes it natively
+   *  via the `document` content block (no client-side page splitting). */
+  packetDocument?: { base64: string; mediaType: "application/pdf" };
   workspaceId: string;
+  /** Generic ledger linkage — replaces the older `sourceEmailId`-only form so
+   *  the parser can be driven from any source (email-in, direct upload, …). */
+  relatedEntity?: { type: string; id: string };
+  /** Back-compat shim for callers that still pass an inbound-email id. */
   sourceEmailId?: string;
 }
 
 export async function parseFacilityPacket(
   params: FacilityParseParams,
 ): Promise<FacilityRequirements> {
-  const userContent = [
-    ...params.packetImageUrls.map((url) => ({
+  const userContent: Anthropic.MessageParam["content"] = [
+    ...(params.packetImageUrls ?? []).map((url) => ({
       type: "image" as const,
       source: { type: "url" as const, url },
     })),
+    ...(params.packetDocument
+      ? [
+          {
+            type: "document" as const,
+            source: {
+              type: "base64" as const,
+              media_type: params.packetDocument.mediaType,
+              data: params.packetDocument.base64,
+            },
+          },
+        ]
+      : []),
     {
       type: "text" as const,
       text: "Parse this facility privileging packet. Call extract_requirements with the structured output.",
     },
   ];
+
+  if (
+    (!params.packetImageUrls || params.packetImageUrls.length === 0) &&
+    !params.packetDocument
+  ) {
+    throw new Error("parseFacilityPacket requires packetImageUrls or packetDocument");
+  }
+
+  const relatedEntity =
+    params.relatedEntity ??
+    (params.sourceEmailId
+      ? { type: "inbound_email", id: params.sourceEmailId }
+      : undefined);
 
   const { output } = await anthropicCall({
     task: "facility.parse",
@@ -117,9 +152,7 @@ export async function parseFacilityPacket(
     toolChoice: { type: "tool", name: "extract_requirements" },
     expectedSchema: RequirementsSchema,
     workspaceId: params.workspaceId,
-    ...(params.sourceEmailId
-      ? { relatedEntity: { type: "inbound_email", id: params.sourceEmailId } }
-      : {}),
+    ...(relatedEntity ? { relatedEntity } : {}),
     maxTokens: 8192,
   });
 
