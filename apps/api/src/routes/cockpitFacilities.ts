@@ -6,6 +6,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
+import { requireWriterOnMutations } from "../middleware/rbac.js";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
 import { advanceIngestJobInline } from "../services/facilityIngestJob.js";
@@ -13,7 +14,12 @@ import type { ApiBindings } from "../types.js";
 
 export const cockpitFacilityRoutes = new Hono<ApiBindings>();
 
-cockpitFacilityRoutes.use("/v1/cockpit/*", requireStaffAuth, requireTenancy);
+cockpitFacilityRoutes.use(
+  "/v1/cockpit/*",
+  requireStaffAuth,
+  requireTenancy,
+  requireWriterOnMutations,
+);
 
 const INGEST_ACCEPTED_MIME = [
   "application/pdf",

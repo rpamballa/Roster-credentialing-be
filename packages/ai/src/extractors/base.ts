@@ -1,3 +1,4 @@
+import type Anthropic from "@anthropic-ai/sdk";
 import type { DocumentType, ExtractedField } from "@cred/types/domain";
 import { ExtractedFieldsSchema } from "@cred/types/domain";
 import { z } from "zod";
@@ -17,9 +18,24 @@ export interface ExtractorSpec {
   typeGuidance: string;
 }
 
+/** Media types Anthropic's Messages API accepts inline. */
+export type ImageMediaType = "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+export type DocumentMediaType = "application/pdf";
+export type SupportedMediaType = ImageMediaType | DocumentMediaType;
+
+/**
+ * One unit of document content. Inline base64 sidesteps Anthropic's
+ * "Only HTTPS URLs are supported" 400 when bytes live behind an internal
+ * http://minio:9000 signed URL. Mirrors `FacilityParseParams.packetDocument`.
+ */
+export type DocumentContent = {
+  base64: string;
+  mediaType: SupportedMediaType;
+};
+
 const BASE_SYSTEM = `You are a credentialing-document extraction expert.
-Given one or more page images, extract the structured fields requested for
-this document type. For every field you return:
+Given one or more page images (or a PDF document), extract the structured
+fields requested for this document type. For every field you return:
 
 - value:      the extracted value, or null if the field is not present
 - confidence: your confidence the value is correct, in [0,1]
@@ -31,17 +47,41 @@ null with low confidence when uncertain.`;
 
 export interface ExtractParams {
   spec: ExtractorSpec;
-  imageUrls: string[];
+  /** One or more inline documents/images for the extractor. */
+  contents: DocumentContent[];
   workspaceId?: string | null;
   documentId?: string;
 }
 
+export function contentBlock(
+  content: DocumentContent,
+): Anthropic.ImageBlockParam | Anthropic.DocumentBlockParam {
+  if (content.mediaType === "application/pdf") {
+    return {
+      type: "document" as const,
+      source: {
+        type: "base64" as const,
+        media_type: content.mediaType,
+        data: content.base64,
+      },
+    };
+  }
+  return {
+    type: "image" as const,
+    source: {
+      type: "base64" as const,
+      media_type: content.mediaType,
+      data: content.base64,
+    },
+  };
+}
+
 export async function runExtractor(params: ExtractParams): Promise<ExtractedField[]> {
-  const userContent = [
-    ...params.imageUrls.map((url) => ({
-      type: "image" as const,
-      source: { type: "url" as const, url },
-    })),
+  if (!params.contents || params.contents.length === 0) {
+    throw new Error("runExtractor requires at least one DocumentContent");
+  }
+  const userContent: Anthropic.MessageParam["content"] = [
+    ...params.contents.map(contentBlock),
     {
       type: "text" as const,
       text: `Document type: ${params.spec.documentType}.

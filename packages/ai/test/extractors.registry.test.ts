@@ -20,6 +20,8 @@ describe("extractor registry", () => {
   });
 
   it("throws NoExtractorError for an unsupported type", () => {
-    expect(() => extractByType("malpractice_insurance", [])).toThrow(NoExtractorError);
+    expect(() =>
+      extractByType("malpractice_insurance", [{ base64: "", mediaType: "image/jpeg" }]),
+    ).toThrow(NoExtractorError);
   });
 });

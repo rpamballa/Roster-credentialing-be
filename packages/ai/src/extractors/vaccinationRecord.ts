@@ -1,5 +1,5 @@
 import type { ExtractedField } from "@cred/types/domain";
-import { type ExtractorSpec, runExtractor } from "./base.js";
+import { type DocumentContent, type ExtractorSpec, runExtractor } from "./base.js";
 
 const SPEC: ExtractorSpec = {
   documentType: "vaccination_record",
@@ -18,8 +18,8 @@ doses — emit one field set per vaccine_name. Common values for vaccine_name:
 };
 
 export function extractVaccinationRecord(
-  imageUrls: string[],
+  contents: DocumentContent[],
   ctx: { workspaceId?: string | null; documentId?: string } = {},
 ): Promise<ExtractedField[]> {
-  return runExtractor({ spec: SPEC, imageUrls, ...ctx });
+  return runExtractor({ spec: SPEC, contents, ...ctx });
 }

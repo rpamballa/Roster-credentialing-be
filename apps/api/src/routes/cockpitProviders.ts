@@ -7,6 +7,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
+import { requireWriterOnMutations } from "../middleware/rbac.js";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
 import { fromFeDocumentType } from "../graphql/mappings.js";
@@ -14,7 +15,12 @@ import type { ApiBindings } from "../types.js";
 
 export const cockpitProviderRoutes = new Hono<ApiBindings>();
 
-cockpitProviderRoutes.use("/v1/cockpit/*", requireStaffAuth, requireTenancy);
+cockpitProviderRoutes.use(
+  "/v1/cockpit/*",
+  requireStaffAuth,
+  requireTenancy,
+  requireWriterOnMutations,
+);
 
 const MAX_DOC_BYTES = 50 * 1024 * 1024;
 

@@ -1,5 +1,5 @@
 import type { ExtractedField } from "@cred/types/domain";
-import { type ExtractorSpec, runExtractor } from "./base.js";
+import { type DocumentContent, type ExtractorSpec, runExtractor } from "./base.js";
 
 const SPEC: ExtractorSpec = {
   documentType: "medical_school_diploma",
@@ -11,8 +11,8 @@ school name as it appears on the diploma.`,
 };
 
 export function extractDiploma(
-  imageUrls: string[],
+  contents: DocumentContent[],
   ctx: { workspaceId?: string | null; documentId?: string } = {},
 ): Promise<ExtractedField[]> {
-  return runExtractor({ spec: SPEC, imageUrls, ...ctx });
+  return runExtractor({ spec: SPEC, contents, ...ctx });
 }

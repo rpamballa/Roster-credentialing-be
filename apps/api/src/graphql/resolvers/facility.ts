@@ -3,6 +3,7 @@ import { audit } from "@cred/observability";
 import { and, eq } from "drizzle-orm";
 import { GraphQLError } from "graphql";
 import type { GqlContext } from "../context.js";
+import { assertWriter } from "../rbac.js";
 
 interface FacilityProfileGql {
   id: string;
@@ -113,6 +114,7 @@ async function correct(
   args: { input: { id: string; fieldPath: string; after: unknown } },
   ctx: GqlContext,
 ): Promise<FacilityProfileGql> {
+  await assertWriter(ctx);
   const userId = staffUserId(ctx);
   const { id, fieldPath, after } = args.input;
 
@@ -194,6 +196,7 @@ async function approve(
   args: { id: string },
   ctx: GqlContext,
 ): Promise<FacilityProfileGql> {
+  await assertWriter(ctx);
   const userId = staffUserId(ctx);
 
   const approved = await withTenancy(ctx.tenancy, async (tx) => {

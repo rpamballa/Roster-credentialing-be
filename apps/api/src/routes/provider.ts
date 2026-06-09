@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { CaseAccessInvalidError, createProviderSession, redeemCaseAccessToken } from "@cred/auth";
 import { env } from "@cred/config";
 import { db, schema, withTenancy } from "@cred/db";
@@ -6,13 +6,13 @@ import { audit } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import { ExtractedFieldsSchema } from "@cred/types/domain";
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { setCookie } from "hono/cookie";
 import { z } from "zod";
 import { SESSION_COOKIE, requireProviderAuth } from "../middleware/session.js";
 import { requireProviderTenancy } from "../middleware/tenancy.js";
-import { temporal } from "../services/temporal.js";
+import { advanceDocumentExtractionInline } from "../services/documentExtractionInline.js";
 import type { ApiBindings } from "../types.js";
 
 export const providerRoutes = new Hono<ApiBindings>();
@@ -36,6 +36,16 @@ providerRoutes.post("/provider/auth/redeem", zValidator("json", RedeemSchema), a
       path: "/",
       maxAge: 30 * 24 * 60 * 60,
     });
+    await audit({
+      workspaceId,
+      actorUserId: null,
+      actorType: "agent",
+      action: "auth.provider_invite.redeemed",
+      targetEntityType: "case",
+      targetEntityId: caseId,
+      after: { providerId },
+      requestId: c.var.requestId,
+    });
     return c.json({ ok: true, caseId, providerId });
   } catch (err) {
     if (err instanceof CaseAccessInvalidError) {
@@ -51,6 +61,88 @@ providerRoutes.post("/provider/auth/redeem", zValidator("json", RedeemSchema), a
     }
     throw err;
   }
+});
+
+// ─── auth: preview — peek at the case behind a token without consuming it ─
+// The provider invite landing page (apps/web/app/(provider)/invite/[token])
+// uses this to show "Hello, Aanya — Northstar has invited you to Mercy
+// Memorial". The token is NOT consumed here; redemption only happens on the
+// /provider/auth/redeem call when the user clicks Begin.
+const PreviewSchema = z.object({ token: z.string().min(32).max(256) });
+providerRoutes.post("/provider/auth/preview", zValidator("json", PreviewSchema), async (c) => {
+  const { token } = c.req.valid("json");
+  const hash = createHash("sha256").update(token).digest("hex");
+
+  // rls: bypass — pre-session lookup by token hash + case/provider/workspace
+  // joins. The whole point of this endpoint is to operate without a session.
+  const [row] = await db()
+    .select({
+      caseId: schema.caseAccessTokens.caseId,
+      providerId: schema.caseAccessTokens.providerId,
+      facilityProfileId: schema.cases.facilityProfileId,
+      workspaceId: schema.cases.workspaceId,
+      targetSubmissionDate: schema.cases.targetSubmissionDate,
+      firstName: schema.providers.firstName,
+      workspaceName: schema.workspaces.name,
+    })
+    .from(schema.caseAccessTokens)
+    .innerJoin(schema.cases, eq(schema.cases.id, schema.caseAccessTokens.caseId))
+    .innerJoin(schema.providers, eq(schema.providers.id, schema.cases.providerId))
+    .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.cases.workspaceId))
+    .where(
+      and(
+        eq(schema.caseAccessTokens.tokenHash, hash),
+        isNull(schema.caseAccessTokens.revokedAt),
+        sql`${schema.caseAccessTokens.expiresAt} > now()`,
+      ),
+    )
+    .limit(1);
+
+  if (!row) {
+    return c.json(
+      {
+        type: "https://errors.cred/provider/invalid-token",
+        title: "Invalid or expired case access token",
+        status: 400,
+        instance: c.var.requestId,
+      },
+      400,
+    );
+  }
+
+  // Look up the facility name. The cases table stores facility_profile_id
+  // without a FK (M2 sequencing), so we resolve the profile → facility join
+  // in a second query rather than threading it through the join above.
+  let facilityName = "your facility";
+  if (row.facilityProfileId) {
+    const [fp] = await db()
+      .select({ facilityId: schema.facilityProfiles.facilityId })
+      .from(schema.facilityProfiles)
+      .where(eq(schema.facilityProfiles.id, row.facilityProfileId))
+      .limit(1);
+    if (fp) {
+      const [f] = await db()
+        .select({ name: schema.facilities.name })
+        .from(schema.facilities)
+        .where(eq(schema.facilities.id, fp.facilityId))
+        .limit(1);
+      if (f?.name) facilityName = f.name;
+    }
+  }
+
+  return c.json({
+    providerFirstName: row.firstName,
+    workspaceName: row.workspaceName,
+    facilityName,
+    totalSteps: 8,
+    stepHighlights: [
+      "Capture your license, DEA, and board certification",
+      "Confirm AI-extracted fields with a tap",
+      "Add two professional references",
+      "E-sign your attestation",
+    ],
+    targetDate: row.targetSubmissionDate ?? null,
+  });
 });
 
 // All routes below need the provider session and the case's workspace
@@ -148,17 +240,13 @@ providerRoutes.post(
       requestId: c.var.requestId,
     });
 
-    const client = await temporal();
-    await client.workflow.start("extractionWorkflow", {
-      taskQueue: env().TEMPORAL_TASK_QUEUE,
-      workflowId: `extract-${documentId}`,
-      args: [
-        {
-          documentId,
-          workspaceId: tenancy.workspaceId,
-          actorUserId: null,
-        },
-      ],
+    // Inline extraction — see services/documentExtractionInline.ts. The
+    // Temporal worker is disabled in the staging stack, and the activity
+    // bodies were lifted directly so behaviour is identical. Detached
+    // promise: the handler returns immediately and the FE polls.
+    void advanceDocumentExtractionInline({
+      documentId,
+      workspaceId: tenancy.workspaceId,
     });
 
     return c.json({ documentId, extractionStatus: "pending" });

@@ -48,9 +48,51 @@ function humanizeFieldKey(key: string): string {
     .replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-export function mapExtractedFields(fields: DomainExtractedField[] | null): ExtractedFieldGql[] {
-  if (!fields) return [];
-  return fields.map((f) => ({
+/**
+ * Normalize whatever shape the DB hands us into the canonical
+ * `DomainExtractedField[]` array. Production rows are written by the AI
+ * extractors (already array-shaped), but seed data, hand-written fixtures,
+ * and pre-canonical migrations can produce `{key: {value, confidence, ...}}`
+ * object shapes. Defending against both means one malformed document never
+ * 500s an entire case-detail page.
+ */
+function normalizeExtractedFields(
+  raw: unknown,
+): DomainExtractedField[] {
+  if (raw == null) return [];
+  if (Array.isArray(raw)) return raw as DomainExtractedField[];
+  if (typeof raw !== "object") return [];
+  // Object shape: `{ field_name: { value, confidence, page?, bbox? } }`
+  return Object.entries(raw as Record<string, unknown>)
+    .map(([name, entry]): DomainExtractedField | null => {
+      if (!entry || typeof entry !== "object") return null;
+      const e = entry as Record<string, unknown>;
+      const value =
+        typeof e.value === "string" ||
+        typeof e.value === "number" ||
+        typeof e.value === "boolean" ||
+        e.value === null
+          ? (e.value as DomainExtractedField["value"])
+          : null;
+      const confidence = typeof e.confidence === "number" ? e.confidence : 0;
+      return {
+        name,
+        value,
+        confidence,
+        page: typeof e.page === "number" ? e.page : 0,
+        bbox: Array.isArray(e.bbox)
+          ? (e.bbox as DomainExtractedField["bbox"])
+          : ([0, 0, 1, 0.1] as DomainExtractedField["bbox"]),
+      };
+    })
+    .filter((f): f is DomainExtractedField => f !== null);
+}
+
+export function mapExtractedFields(
+  fields: DomainExtractedField[] | Record<string, unknown> | null | undefined,
+): ExtractedFieldGql[] {
+  const normalized = normalizeExtractedFields(fields);
+  return normalized.map((f) => ({
     key: f.name,
     label: humanizeFieldKey(f.name),
     value: f.value === null ? "" : String(f.value),
@@ -66,14 +108,17 @@ function mapBlockers(blockers: DomainBlocker[] | null | undefined): BlockerGql[]
   if (!blockers) return [];
   return blockers
     .filter((b) => !b.resolvedAt)
+    // GraphQL `Blocker.kind` is non-null; a malformed row with no `type` would
+    // otherwise crash the whole case detail. Drop those rather than 500.
+    .filter((b) => typeof b?.type === "string" && b.type.length > 0)
     .map(
       (b, i): BlockerGql => ({
-        id: `blocker_${i}_${b.raisedAt}`,
+        id: `blocker_${i}_${b.raisedAt ?? "unknown"}`,
         kind: b.type,
-        message: b.message,
+        message: b.message ?? "",
         documentId: null,
         requirementKey: null,
-        raisedAt: b.raisedAt,
+        raisedAt: b.raisedAt ?? new Date(0).toISOString(),
       }),
     );
 }
@@ -173,8 +218,12 @@ export async function caseDetailResolver(
     const matching = detail.docs.find((d) => d.documentType === rd.type);
     const now = Date.now();
 
-    const lowConfidence =
-      matching?.extractedFields?.some((f) => f.confidence < LOW_CONFIDENCE_THRESHOLD) ?? false;
+    // mapExtractedFields handles the legacy object shape; route through it
+    // here so this check can't be tripped by a misshapen row either.
+    const matchingFields = mapExtractedFields(matching?.extractedFields ?? null);
+    const lowConfidence = matchingFields.some(
+      (f) => f.confidence < LOW_CONFIDENCE_THRESHOLD,
+    );
     const expired =
       matching?.expiresAt !== null && matching?.expiresAt !== undefined
         ? matching.expiresAt.getTime() < now

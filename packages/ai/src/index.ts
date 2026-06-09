@@ -15,7 +15,13 @@ export {
   extractLicense,
   extractVaccinationRecord,
 } from "./extractors/index.js";
-export type { ExtractorFn } from "./extractors/index.js";
+export type {
+  DocumentContent,
+  DocumentMediaType,
+  ExtractorFn,
+  ImageMediaType,
+  SupportedMediaType,
+} from "./extractors/index.js";
 export { parseFacilityPacket } from "./facilityParser.js";
 export type { FacilityParseParams } from "./facilityParser.js";
 export { reasonMissingDocs } from "./missingDocs.js";

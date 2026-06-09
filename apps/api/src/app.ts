@@ -6,6 +6,9 @@ import { sessionLoader } from "./middleware/session.js";
 import { requireTenancy } from "./middleware/tenancy.js";
 import { attestationRoutes } from "./routes/attestations.js";
 import { authRoutes } from "./routes/auth.js";
+// 🚨 DEMO AUTH — remove this import + the `mountDemoAuth(app)` call below
+// before deploying to production. See routes/demoAuth.ts.
+import { mountDemoAuth } from "./routes/demoAuth.js";
 import { cockpitCaseRoutes } from "./routes/cockpitCases.js";
 import { cockpitFacilityRoutes } from "./routes/cockpitFacilities.js";
 import { cockpitOutreachRoutes } from "./routes/cockpitOutreach.js";
@@ -15,6 +18,7 @@ import { healthRoutes } from "./routes/health.js";
 import { meRoutes } from "./routes/me.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { packetRoutes } from "./routes/packet.js";
+import { caseRoutes } from "./routes/cases.js";
 import { providerRoutes } from "./routes/provider.js";
 import { referenceRoutes } from "./routes/reference.js";
 import { webhookRoutes } from "./routes/webhooks.js";
@@ -35,8 +39,15 @@ export function buildApp(): Hono<ApiBindings> {
   app.use("/webhooks/*", rateLimit({ scope: "webhooks", windowSeconds: 60, max: 120 }));
 
   app.route("/", authRoutes);
+  // 🚨 DEMO AUTH — staging only. Mounted directly on the app (not as a
+  // sub-router) to bypass other sub-routers' catch-all auth middleware.
+  // The handler itself is gated on DEMO_AUTH_ENABLED=true and returns 404
+  // otherwise; deleting the import + this line is the cleanest pre-prod
+  // cleanup.
+  mountDemoAuth(app);
   app.route("/", meRoutes);
   app.route("/", providerRoutes);
+  app.route("/", caseRoutes);
   app.route("/", referenceRoutes);
   app.route("/", webhookRoutes);
   app.route("/", attestationRoutes);

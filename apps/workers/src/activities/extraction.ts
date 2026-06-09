@@ -1,10 +1,50 @@
 import { createHash } from "node:crypto";
-import { classifyDocument, extractByType } from "@cred/ai";
+import {
+  classifyDocument,
+  extractByType,
+  type DocumentContent,
+  type SupportedMediaType,
+} from "@cred/ai";
 import { db, schema } from "@cred/db";
 import { audit } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import type { DocumentType, ExtractedField } from "@cred/types/domain";
 import { eq } from "drizzle-orm";
+
+const MAX_BYTES = 20 * 1024 * 1024; // 20 MB
+
+function toSupportedMediaType(mime: string | null | undefined): SupportedMediaType {
+  switch (mime) {
+    case "application/pdf":
+    case "image/jpeg":
+    case "image/png":
+    case "image/gif":
+    case "image/webp":
+      return mime;
+    default:
+      throw new Error(`unsupported mime type for extraction: ${mime ?? "null"}`);
+  }
+}
+
+async function loadDocumentContent(
+  fileUri: string,
+  mimeType: string | null,
+): Promise<DocumentContent> {
+  const mediaType = toSupportedMediaType(mimeType);
+  const signed = await getObjectStorage().getSignedUrl({
+    key: fileUri,
+    expiresInSeconds: 15 * 60,
+  });
+  const response = await fetch(signed.url);
+  if (!response.ok) {
+    throw new Error(`object storage fetch ${response.status}`);
+  }
+  const buf = Buffer.from(await response.arrayBuffer());
+  if (buf.byteLength > MAX_BYTES) {
+    throw new Error(`document exceeds ${MAX_BYTES} bytes (${buf.byteLength})`);
+  }
+  return { base64: buf.toString("base64"), mediaType };
+}
 
 const AUTO_FILL_THRESHOLD = 0.9;
 const FLAG_THRESHOLD = 0.7;
@@ -34,19 +74,16 @@ export async function classifyActivity(
 ): Promise<{ documentType: DocumentType; confidence: number }> {
   // rls: bypass — activity loads its target by id from a trusted workflow.
   const rows = await db()
-    .select({ fileUri: schema.documents.fileUri })
+    .select({ fileUri: schema.documents.fileUri, mimeType: schema.documents.mimeType })
     .from(schema.documents)
     .where(eq(schema.documents.id, ctx.documentId))
     .limit(1);
   const doc = rows[0];
   if (!doc) throw new Error(`document ${ctx.documentId} not found`);
 
-  const signed = await getObjectStorage().getSignedUrl({
-    key: doc.fileUri,
-    expiresInSeconds: 15 * 60,
-  });
+  const content = await loadDocumentContent(doc.fileUri, doc.mimeType);
   const result = await classifyDocument({
-    imageUrl: signed.url,
+    content,
     workspaceId: ctx.workspaceId,
     documentId: ctx.documentId,
   });
@@ -58,19 +95,15 @@ export async function extractActivity(
 ): Promise<{ fields: ExtractedField[]; averageConfidence: number }> {
   // rls: bypass — activity loads its target by id from a trusted workflow.
   const rows = await db()
-    .select({ fileUri: schema.documents.fileUri })
+    .select({ fileUri: schema.documents.fileUri, mimeType: schema.documents.mimeType })
     .from(schema.documents)
     .where(eq(schema.documents.id, ctx.documentId))
     .limit(1);
   const doc = rows[0];
   if (!doc) throw new Error(`document ${ctx.documentId} not found`);
 
-  const signed = await getObjectStorage().getSignedUrl({
-    key: doc.fileUri,
-    expiresInSeconds: 15 * 60,
-  });
-
-  const fields = await extractByType(ctx.documentType, [signed.url], {
+  const content = await loadDocumentContent(doc.fileUri, doc.mimeType);
+  const fields = await extractByType(ctx.documentType, [content], {
     workspaceId: ctx.workspaceId,
     documentId: ctx.documentId,
   });

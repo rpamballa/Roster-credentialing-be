@@ -4,6 +4,7 @@ import { zValidator } from "@hono/zod-validator";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
+import { requireWriterOnMutations } from "../middleware/rbac.js";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
 import type { ApiBindings } from "../types.js";
@@ -13,7 +14,12 @@ import type { ApiBindings } from "../types.js";
 // its own table — until then a single JSON column keeps reads cheap.
 export const cockpitOutreachRoutes = new Hono<ApiBindings>();
 
-cockpitOutreachRoutes.use("/v1/cockpit/*", requireStaffAuth, requireTenancy);
+cockpitOutreachRoutes.use(
+  "/v1/cockpit/*",
+  requireStaffAuth,
+  requireTenancy,
+  requireWriterOnMutations,
+);
 
 const OutreachChannel = z.enum(["sms", "email", "sms_and_email"]);
 

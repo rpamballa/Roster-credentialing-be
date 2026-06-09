@@ -49,10 +49,67 @@ export class ReferenceTokenInvalidError extends Error {
   }
 }
 
+export class ReferenceTokenConsumedError extends Error {
+  constructor() {
+    super("reference token has already been used");
+    this.name = "ReferenceTokenConsumedError";
+  }
+}
+
 export interface ReferenceRedeemResult {
   referenceId: string;
   caseId: string;
   workspaceId: string;
+}
+
+export interface ReferencePreviewResult {
+  referenceId: string;
+  caseId: string;
+  workspaceId: string;
+}
+
+/**
+ * Look up a reference token WITHOUT consuming it. Used by the public preview
+ * GET so the responder sees context before they fill the form.
+ *
+ * Errors:
+ *  - ReferenceTokenInvalidError: token hash unknown OR expired.
+ *  - ReferenceTokenConsumedError: token already used (the form was submitted).
+ *
+ * NOTE: the caller still has to call consumeReferenceToken on submit — preview
+ * is read-only.
+ */
+export async function previewReferenceToken(token: string): Promise<ReferencePreviewResult> {
+  // rls: bypass — public preview keyed by hash, no session yet.
+  const [tok] = await db()
+    .select({
+      referenceId: schema.referenceAccessTokens.referenceId,
+      expiresAt: schema.referenceAccessTokens.expiresAt,
+      consumedAt: schema.referenceAccessTokens.consumedAt,
+    })
+    .from(schema.referenceAccessTokens)
+    .where(eq(schema.referenceAccessTokens.tokenHash, hash(token)))
+    .limit(1);
+  if (!tok) throw new ReferenceTokenInvalidError();
+  if (tok.expiresAt.getTime() <= Date.now()) throw new ReferenceTokenInvalidError();
+  if (tok.consumedAt) throw new ReferenceTokenConsumedError();
+
+  // rls: bypass — fetching the parent reference's case/workspace.
+  const [ref] = await db()
+    .select({
+      caseId: schema.references.caseId,
+      workspaceId: schema.references.workspaceId,
+    })
+    .from(schema.references)
+    .where(eq(schema.references.id, tok.referenceId))
+    .limit(1);
+  if (!ref) throw new ReferenceTokenInvalidError();
+
+  return {
+    referenceId: tok.referenceId,
+    caseId: ref.caseId,
+    workspaceId: ref.workspaceId,
+  };
 }
 
 export async function consumeReferenceToken(token: string): Promise<ReferenceRedeemResult> {
