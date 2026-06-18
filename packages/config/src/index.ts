@@ -39,6 +39,15 @@ const EnvSchema = z.object({
   DOCUSIGN_USER_ID: z.string().optional(),
   DOCUSIGN_ACCOUNT_ID: z.string().optional(),
   DOCUSIGN_PRIVATE_KEY: z.string().optional(),
+
+  // Marketing lead intake — both optional.
+  // SLACK_WEBHOOK_URL: incoming-webhook URL pinged when a new lead lands.
+  // Empty/unset = no-op (logged only). Wire when the channel is ready.
+  SLACK_WEBHOOK_URL: z.string().url().optional(),
+  // TURNSTILE_SECRET_KEY: Cloudflare Turnstile secret. When unset, server-side
+  // verification is skipped (endpoint stays IP rate-limited regardless).
+  // When set, requests without a valid token are rejected 400.
+  TURNSTILE_SECRET_KEY: z.string().optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

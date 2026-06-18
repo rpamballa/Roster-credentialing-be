@@ -15,6 +15,7 @@ import { cockpitOutreachRoutes } from "./routes/cockpitOutreach.js";
 import { cockpitProviderRoutes } from "./routes/cockpitProviders.js";
 import { graphqlHandler } from "./routes/graphql.js";
 import { healthRoutes } from "./routes/health.js";
+import { marketingLeadRoutes } from "./routes/marketingLeads.js";
 import { meRoutes } from "./routes/me.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { packetRoutes } from "./routes/packet.js";
@@ -37,6 +38,9 @@ export function buildApp(): Hono<ApiBindings> {
   app.use("/auth/magic-link/*", rateLimit({ scope: "magic-link", windowSeconds: 60, max: 10 }));
   app.use("/reference/*", rateLimit({ scope: "reference", windowSeconds: 60, max: 30 }));
   app.use("/webhooks/*", rateLimit({ scope: "webhooks", windowSeconds: 60, max: 120 }));
+  // Public marketing form intake. Per-IP cap is intentionally tight — a real
+  // applicant fills one or two forms; anything beyond that is spam.
+  app.use("/v1/marketing/*", rateLimit({ scope: "marketing", windowSeconds: 3600, max: 5 }));
 
   app.route("/", authRoutes);
   // 🚨 DEMO AUTH — staging only. Mounted directly on the app (not as a
@@ -53,6 +57,7 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", attestationRoutes);
   app.route("/", packetRoutes);
   app.route("/", metricsRoutes);
+  app.route("/", marketingLeadRoutes);
 
   // Cockpit REST surface. Each sub-router applies requireStaffAuth +
   // requireTenancy on the `/v1/cockpit/*` prefix itself.
