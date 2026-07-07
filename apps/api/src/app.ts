@@ -22,6 +22,7 @@ import { packetRoutes } from "./routes/packet.js";
 import { caseRoutes } from "./routes/cases.js";
 import { providerRoutes } from "./routes/provider.js";
 import { referenceRoutes } from "./routes/reference.js";
+import { supportRoutes } from "./routes/support.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import type { ApiBindings } from "./types.js";
 
@@ -58,6 +59,7 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", packetRoutes);
   app.route("/", metricsRoutes);
   app.route("/", marketingLeadRoutes);
+  app.route("/", supportRoutes);
 
   // Cockpit REST surface. Each sub-router applies requireStaffAuth +
   // requireTenancy on the `/v1/cockpit/*` prefix itself.

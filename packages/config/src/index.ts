@@ -61,9 +61,15 @@ const EnvSchema = z.object({
   DOCUSIGN_PRIVATE_KEY: z.string().optional(),
 
   // Marketing lead intake — both optional.
-  // SLACK_WEBHOOK_URL: incoming-webhook URL pinged when a new lead lands.
-  // Empty/unset = no-op (logged only). Wire when the channel is ready.
+  // SLACK_WEBHOOK_URL: incoming-webhook URL pinged when a new lead lands
+  // AND when a support ticket is filed. Empty/unset = no-op (logged only).
   SLACK_WEBHOOK_URL: z.string().url().optional(),
+
+  // Support ticket persistence via Google Apps Script webhook. Both must
+  // be set to enable Sheet sync; if either is missing we still emit to
+  // Slack (if configured) + always to the audit log.
+  SUPPORT_WEBHOOK_URL: z.string().url().optional(),
+  SUPPORT_WEBHOOK_TOKEN: z.string().optional(),
   // TURNSTILE_SECRET_KEY: Cloudflare Turnstile secret. When unset, server-side
   // verification is skipped (endpoint stays IP rate-limited regardless).
   // When set, requests without a valid token are rejected 400.
@@ -75,7 +81,16 @@ export type Env = z.infer<typeof EnvSchema>;
 let cached: Env | undefined;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
-  const parsed = EnvSchema.safeParse(source);
+  // Docker compose passes unset .env vars through as empty strings, not
+  // undefined. Zod's `.optional()` accepts undefined but its `.url()` +
+  // `.email()` reject empty strings — so an unset SLACK_WEBHOOK_URL boot-
+  // crashes the api. Coerce empty strings to undefined here so every
+  // `.optional()` field behaves the way callers expect.
+  const cleaned: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(source)) {
+    cleaned[k] = v === "" ? undefined : v;
+  }
+  const parsed = EnvSchema.safeParse(cleaned);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
