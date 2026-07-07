@@ -28,8 +28,28 @@ const EnvSchema = z.object({
   ANTHROPIC_MODEL_SONNET: z.string().default("claude-sonnet-4-6"),
   ANTHROPIC_MODEL_OPUS: z.string().default("claude-opus-4-7"),
 
-  RESEND_API_KEY: z.string().optional(),
-  RESEND_FROM_EMAIL: z.string().email().default("noreply@platform.example.com"),
+  // Resend transactional email — used for magic-link and provider-invite sends.
+  // Optional so dev + integration test runs (which don't need real email)
+  // still boot; the send path itself must guard on `env().RESEND_API_KEY`
+  // being present and log-fallback when it isn't.
+  // Format guard: real Resend keys always start with `re_`. If someone
+  // pastes the wrong secret (postgres password, Anthropic key, …) into
+  // this slot, we want boot to fail loudly rather than call the API
+  // with garbage.
+  RESEND_API_KEY: z
+    .string()
+    .startsWith("re_", "RESEND_API_KEY must start with 're_' — check the value from Resend")
+    .optional(),
+  // Accepts either a bare email (`auth@rosterhealthcare.com`) or the
+  // display-name form (`Roster Healthcare <auth@rosterhealthcare.com>`).
+  // Resend accepts both; we accept both.
+  RESEND_FROM_EMAIL: z
+    .string()
+    .refine(
+      (v) => /^[^\s<>]+@[^\s<>]+\.[^\s<>]+$/.test(v) || /<[^\s<>]+@[^\s<>]+\.[^\s<>]+>$/.test(v),
+      "RESEND_FROM_EMAIL must be an email or 'Name <email>' form",
+    )
+    .default("noreply@rosterhealthcare.com"),
 
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),

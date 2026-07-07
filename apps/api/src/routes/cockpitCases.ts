@@ -1,4 +1,4 @@
-import { issueCaseAccessToken, issueReferenceToken } from "@cred/auth";
+import { issueCaseAccessToken, issueReferenceToken, sendEmail } from "@cred/auth";
 import { env } from "@cred/config";
 import { schema, withTenancy } from "@cred/db";
 import { audit, logger } from "@cred/observability";
@@ -384,6 +384,36 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/invite-provider", async (c) =>
     },
     "provider_invite_magic_link_issued",
   );
+
+  // Deliver the invite to the provider directly. `sendEmail` is a no-op in
+  // non-production or when RESEND_API_KEY is unset — the URL still comes
+  // back in the response so the specialist can share via clipboard as a
+  // fallback. Wrapped in try/catch so a Resend outage never blocks the
+  // cockpit action; the specialist keeps their clipboard flow.
+  if (detail.provider?.email) {
+    try {
+      const greeting = detail.provider.firstName?.trim() || "there";
+      await sendEmail({
+        to: detail.provider.email,
+        subject: "Roster Healthcare — start your credentialing packet",
+        text:
+          `Hi ${greeting},\n\n` +
+          `You've been invited to complete a credentialing case with Roster Healthcare. ` +
+          `Get started here:\n\n${url}\n\n` +
+          `This link expires in 7 days and can only be used from this device.\n\n` +
+          "— The Roster Healthcare team",
+      });
+      logger.info(
+        { caseId: detail.caseRow.id, providerId: detail.caseRow.providerId },
+        "provider_invite_email_sent",
+      );
+    } catch (err) {
+      logger.error(
+        { err, caseId: detail.caseRow.id, providerId: detail.caseRow.providerId },
+        "provider_invite_email_send_failed",
+      );
+    }
+  }
 
   return c.json({ url, expiresAt: expiresAt.toISOString() });
 });
