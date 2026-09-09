@@ -1,0 +1,54 @@
+# Single-node Postgres 16 + pgmq for the credentialing platform.
+# Runs on a GCE VM under Container-Optimized OS (COS). Data lives on a
+# separate persistent disk mounted at /var/lib/postgresql/data.
+#
+# Env vars are injected by cloud-init from Secret Manager.
+
+services:
+  postgres:
+    image: quay.io/tembo/pg16-pgmq:latest
+    container_name: cred-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # WAL archival target — the archive-wal.sh script pushes to GCS.
+      # Set at cloud-init time and passed here.
+      WAL_ARCHIVE_BUCKET: ${WAL_ARCHIVE_BUCKET}
+    volumes:
+      - /var/lib/postgresql/data:/var/lib/postgresql/data
+      - ./conf.d/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./conf.d/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./archive-wal.sh:/usr/local/bin/archive-wal.sh:ro
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+
+  # Prometheus/OpenMetrics exporter for postgres. Scraped by the OTel
+  # Collector sidecar; forwarded to Cloud Monitoring.
+  postgres_exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: cred-postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: >-
+        postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy

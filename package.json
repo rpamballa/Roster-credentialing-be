@@ -16,7 +16,8 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "db:generate": "pnpm --filter @cred/db generate",
-    "db:migrate": "pnpm --filter @cred/db migrate"
+    "db:migrate": "pnpm --filter @cred/db migrate",
+    "db:seed": "pnpm --filter @cred/db seed"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

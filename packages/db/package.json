@@ -13,6 +13,7 @@
   "scripts": {
     "generate": "drizzle-kit generate",
     "migrate": "node --env-file=../../.env --import tsx src/migrate.ts",
+    "seed": "node --env-file=../../.env --import tsx src/seed.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

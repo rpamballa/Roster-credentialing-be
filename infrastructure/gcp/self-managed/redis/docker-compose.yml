@@ -1,0 +1,44 @@
+# Single-node Redis 7 for sessions + rate-limit counters.
+# Loss tolerance: a magic-link redirect at worst. AOF (fsync every 1s) is
+# sufficient; RDB snapshots are the durable backup form.
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: cred-redis
+    restart: unless-stopped
+    command:
+      - redis-server
+      - /etc/redis/redis.conf
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    volumes:
+      - /data:/data
+      - ./redis.conf:/etc/redis/redis.conf:ro
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    sysctls:
+      # Recommended by Redis so BGSAVE doesn't fail under memory pressure.
+      # Needs `overcommit_memory=1` on the host too (set via sysctl.conf).
+      net.core.somaxconn: "1024"
+    logging:
+      driver: json-file
+      options: { max-size: "50m", max-file: "5" }
+
+  redis_exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: cred-redis-exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "9121:9121"
+    depends_on:
+      redis:
+        condition: service_healthy

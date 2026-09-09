@@ -1,0 +1,52 @@
+#cloud-config
+# Bootstraps a Redis VM on Container-Optimized OS.
+
+write_files:
+  - path: /etc/systemd/system/cred-redis.service
+    permissions: 0644
+    content: |
+      [Unit]
+      Description=cred-redis compose stack
+      Wants=docker.service
+      After=docker.service network-online.target
+      [Service]
+      Type=oneshot
+      RemainAfterExit=true
+      WorkingDirectory=/home/cred/redis
+      EnvironmentFile=/home/cred/redis/.env
+      ExecStart=/usr/bin/docker compose up -d
+      ExecStop=/usr/bin/docker compose down
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/cron.d/cred-redis-backup
+    permissions: 0644
+    content: |
+      # Nightly at 03:37 UTC (offset from Postgres to spread GCS load).
+      37 3 * * * root cd /home/cred/redis && /home/cred/redis/backup.sh >> /var/log/cred-redis-backup.log 2>&1
+
+  - path: /home/cred/redis/fetch-secrets.sh
+    permissions: 0755
+    content: |
+      #!/bin/sh
+      set -eu
+      P=$(gcloud secrets versions access latest --secret=cred-redis-password)
+      cat > /home/cred/redis/.env <<EOF
+      REDIS_PASSWORD=$P
+      BACKUP_BUCKET=${BACKUP_BUCKET}
+      EOF
+      chmod 600 /home/cred/redis/.env
+
+runcmd:
+  # Format + mount the data disk.
+  - [ bash, -lc, "if ! blkid /dev/sdb; then mkfs.ext4 -F /dev/sdb; fi" ]
+  - [ mkdir, -p, /data ]
+  - [ bash, -lc, "grep -q /dev/sdb /etc/fstab || echo '/dev/sdb /data ext4 defaults,noatime 0 2' >> /etc/fstab" ]
+  - [ mount, -a ]
+  # Required by Redis so BGSAVE doesn't fail under memory pressure.
+  - [ bash, -lc, "echo 'vm.overcommit_memory = 1' >> /etc/sysctl.d/99-redis.conf && sysctl -p /etc/sysctl.d/99-redis.conf" ]
+  # Hydrate .env from Secret Manager.
+  - [ /home/cred/redis/fetch-secrets.sh ]
+  # Start the stack via systemd.
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, --now, cred-redis.service ]
