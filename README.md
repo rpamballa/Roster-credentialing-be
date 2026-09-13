@@ -5,10 +5,17 @@ for the authoritative architecture and scope.
 
 ## Quick start
 
+Local infra (postgres, redis, gcs-emulator, temporal) is orchestrated
+from the deploy repo — this repo no longer ships its own compose. See
+`../roster-credentialing-deploy/README.md` for one-command bring-up.
+
+For a bare `pnpm dev` on this checkout, point `DATABASE_URL`,
+`REDIS_URL`, and the `GCS_*` / `STORAGE_EMULATOR_*` vars at whatever
+containers you already have running (typically the deploy stack).
+
 ```bash
 pnpm install
-cp .env.example .env
-docker compose up -d postgres redis minio temporal
+cp .env.example .env      # then edit to match your local infra
 pnpm db:migrate
 pnpm dev
 ```
