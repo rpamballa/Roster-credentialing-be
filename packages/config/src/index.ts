@@ -14,11 +14,19 @@ const EnvSchema = z.object({
   SESSION_SECRET: z.string().min(16),
   MAGIC_LINK_TTL_DAYS: z.coerce.number().int().positive().default(7),
 
-  S3_ENDPOINT: z.string().url().optional(),
-  S3_REGION: z.string().default("us-east-1"),
-  S3_ACCESS_KEY_ID: z.string().optional(),
-  S3_SECRET_ACCESS_KEY: z.string().optional(),
-  S3_BUCKET: z.string().default("cred-dev"),
+  // Google Cloud Storage — bucket that holds provider documents, facility
+  // packets, and other blobs. Prod uses ADC from the attached VM service
+  // account; local dev points at the fake-gcs-server emulator via
+  // STORAGE_EMULATOR_HOST + STORAGE_EMULATOR_PUBLIC_URL.
+  GCP_PROJECT_ID: z.string().optional(),
+  GCS_BUCKET: z.string().default("cred-dev"),
+  // Internal address the SDK dials (docker service DNS in compose).
+  STORAGE_EMULATOR_HOST: z.string().url().optional(),
+  // Address the browser dials for direct uploads/downloads. Same host in
+  // most setups; different only when the emulator is reachable at one
+  // host inside the docker network and another from the developer's
+  // laptop (e.g. `http://localhost:4443` vs `http://gcs-emulator:4443`).
+  STORAGE_EMULATOR_PUBLIC_URL: z.string().url().optional(),
 
   TEMPORAL_ADDRESS: z.string().default("localhost:7233"),
   TEMPORAL_NAMESPACE: z.string().default("default"),

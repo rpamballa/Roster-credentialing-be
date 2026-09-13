@@ -126,9 +126,10 @@ webhookRoutes.post(
 );
 
 async function directPut(key: string, body: Buffer, contentType: string): Promise<void> {
-  // The S3 adapter only exposes signed URLs publicly. For server-internal
-  // writes we use the SDK directly via a fresh client. To avoid coupling
-  // here, we go through the signed URL and PUT to it.
+  // The object-storage adapter only exposes signed URLs publicly. For
+  // server-internal writes we go through the same presign path and PUT
+  // to it — keeps a single code path for object writes regardless of
+  // whether the emulator or real GCS is behind it.
   const presign = await getObjectStorage().putSignedUrl({
     key,
     contentType,

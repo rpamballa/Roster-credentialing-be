@@ -16,8 +16,7 @@
   "dependencies": {
     "@cred/config": "workspace:*",
     "@cred/db": "workspace:*",
-    "@aws-sdk/client-s3": "3.703.0",
-    "@aws-sdk/s3-request-presigner": "3.703.0",
+    "@google-cloud/storage": "7.14.0",
     "drizzle-orm": "0.36.4"
   },
   "devDependencies": {

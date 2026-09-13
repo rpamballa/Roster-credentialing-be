@@ -3,7 +3,7 @@ import type { DocumentType } from "@cred/types/domain";
 import { DOCUMENT_TYPES } from "@cred/types/domain";
 import { z } from "zod";
 import { anthropicCall } from "./client.js";
-import { contentBlock, type DocumentContent } from "./extractors/base.js";
+import { type DocumentContent, contentBlock } from "./extractors/base.js";
 
 const ClassifyResult = z.object({
   document_type: z.enum([...DOCUMENT_TYPES] as [DocumentType, ...DocumentType[]]),
@@ -19,8 +19,8 @@ the document does not match any known type.`;
 
 export interface ClassifyParams {
   /** Inline base64 + mediaType. Anthropic only accepts HTTPS URLs, so when
-   *  the bytes live on an internal http://minio:9000 URL the caller must
-   *  download them and pass them inline. */
+   *  the bytes live behind an internal signed URL (fake-gcs-server locally,
+   *  GCS in prod) the caller must download them and pass them inline. */
   content: DocumentContent;
   workspaceId?: string | null;
   documentId?: string;
