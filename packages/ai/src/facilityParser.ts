@@ -124,18 +124,13 @@ export async function parseFacilityPacket(
     },
   ];
 
-  if (
-    (!params.packetImageUrls || params.packetImageUrls.length === 0) &&
-    !params.packetDocument
-  ) {
+  if ((!params.packetImageUrls || params.packetImageUrls.length === 0) && !params.packetDocument) {
     throw new Error("parseFacilityPacket requires packetImageUrls or packetDocument");
   }
 
   const relatedEntity =
     params.relatedEntity ??
-    (params.sourceEmailId
-      ? { type: "inbound_email", id: params.sourceEmailId }
-      : undefined);
+    (params.sourceEmailId ? { type: "inbound_email", id: params.sourceEmailId } : undefined);
 
   const { output } = await anthropicCall({
     task: "facility.parse",

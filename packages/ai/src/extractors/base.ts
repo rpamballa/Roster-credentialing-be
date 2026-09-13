@@ -26,7 +26,8 @@ export type SupportedMediaType = ImageMediaType | DocumentMediaType;
 /**
  * One unit of document content. Inline base64 sidesteps Anthropic's
  * "Only HTTPS URLs are supported" 400 when bytes live behind an internal
- * http://minio:9000 signed URL. Mirrors `FacilityParseParams.packetDocument`.
+ * signed URL (fake-gcs-server locally, GCS in prod). Mirrors
+ * `FacilityParseParams.packetDocument`.
  */
 export type DocumentContent = {
   base64: string;

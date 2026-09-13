@@ -1,6 +1,6 @@
 import type { DocumentType, ExtractedField } from "@cred/types/domain";
-import type { DocumentContent } from "./base.js";
 import { extractAcls } from "./acls.js";
+import type { DocumentContent } from "./base.js";
 import { extractBls } from "./bls.js";
 import { extractBoardCert } from "./boardCert.js";
 import { extractDea } from "./dea.js";
@@ -58,4 +58,9 @@ export {
   extractLicense,
   extractVaccinationRecord,
 };
-export type { DocumentContent, ImageMediaType, DocumentMediaType, SupportedMediaType } from "./base.js";
+export type {
+  DocumentContent,
+  ImageMediaType,
+  DocumentMediaType,
+  SupportedMediaType,
+} from "./base.js";
