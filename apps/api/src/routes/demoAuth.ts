@@ -22,7 +22,7 @@
 // ╚══════════════════════════════════════════════════════════════════════╝
 
 import { createProviderSession, createSession } from "@cred/auth";
-import { env } from "@cred/config";  // still used for NODE_ENV in cookie config
+import { env } from "@cred/config"; // still used for NODE_ENV in cookie config
 import { db, schema } from "@cred/db";
 import { audit } from "@cred/observability";
 import { zValidator } from "@hono/zod-validator";
@@ -60,10 +60,7 @@ function demoEnabled(): boolean {
  * endpoint before it ran. Registering on the app dodges that.
  */
 export function mountDemoAuth(app: Hono<ApiBindings>): void {
-  app.post(
-    "/auth/dev/demo-signin",
-    zValidator("json", DemoSigninSchema),
-    async (c) => {
+  app.post("/auth/dev/demo-signin", zValidator("json", DemoSigninSchema), async (c) => {
     // When demo auth is off, return 404 (not 401/403) so the route's
     // existence isn't disclosed to probes.
     if (!demoEnabled()) return c.notFound();
@@ -115,8 +112,7 @@ export function mountDemoAuth(app: Hono<ApiBindings>): void {
     });
 
     return c.json({ ok: true });
-    },
-  );
+  });
 
   // ── Provider demo-signin ────────────────────────────────────────────
   // Issues a `provider` session for a seeded case so the mobile-web

@@ -64,6 +64,13 @@
       "when": 1747526400000,
       "tag": "0008_marketing_leads",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1747612800000,
+      "tag": "0009_provider_invite_tokens",
+      "breakpoints": true
     }
   ]
 }

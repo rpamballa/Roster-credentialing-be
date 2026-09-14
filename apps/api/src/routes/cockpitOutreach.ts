@@ -43,9 +43,7 @@ const OutreachSettingsBody = z.object({
   cadences: z.array(OutreachCadence).min(1).max(4),
   pendingDeploy: z.boolean(),
   updatedAt: z.string().min(1),
-  updatedBy: z
-    .object({ id: z.string().min(1), fullName: z.string().min(1) })
-    .nullable(),
+  updatedBy: z.object({ id: z.string().min(1), fullName: z.string().min(1) }).nullable(),
 });
 
 type OutreachSettings = z.infer<typeof OutreachSettingsBody>;

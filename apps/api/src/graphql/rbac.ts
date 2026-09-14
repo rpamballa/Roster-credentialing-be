@@ -26,10 +26,7 @@ export async function assertWriter(ctx: GqlContext): Promise<void> {
     .select({ role: schema.memberships.role })
     .from(schema.memberships)
     .where(
-      and(
-        eq(schema.memberships.userId, userId),
-        eq(schema.memberships.workspaceId, workspaceId),
-      ),
+      and(eq(schema.memberships.userId, userId), eq(schema.memberships.workspaceId, workspaceId)),
     )
     .limit(1);
   if (!row) {
@@ -39,9 +36,8 @@ export async function assertWriter(ctx: GqlContext): Promise<void> {
   }
   const writerSet = new Set<MembershipRole>(WRITER_ROLES);
   if (!writerSet.has(row.role as MembershipRole)) {
-    throw new GraphQLError(
-      `role '${row.role}' is not permitted to perform this action`,
-      { extensions: { code: "FORBIDDEN_ROLE" } },
-    );
+    throw new GraphQLError(`role '${row.role}' is not permitted to perform this action`, {
+      extensions: { code: "FORBIDDEN_ROLE" },
+    });
   }
 }

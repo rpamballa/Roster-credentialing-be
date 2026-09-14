@@ -61,10 +61,7 @@ export function requireRole(roles: readonly MembershipRole[]): MiddlewareHandler
       return forbidden(c, "No membership row for the active workspace.");
     }
     if (!allowed.has(row.role as MembershipRole)) {
-      return forbidden(
-        c,
-        `Role '${row.role}' is not permitted to perform this action.`,
-      );
+      return forbidden(c, `Role '${row.role}' is not permitted to perform this action.`);
     }
 
     await next();

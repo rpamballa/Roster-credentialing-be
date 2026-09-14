@@ -35,12 +35,7 @@ function conflictResponse(c: Context<ApiBindings>, code: string): Response {
 // these directly.
 export const cockpitCaseRoutes = new Hono<ApiBindings>();
 
-cockpitCaseRoutes.use(
-  "/v1/cockpit/*",
-  requireStaffAuth,
-  requireTenancy,
-  requireWriterOnMutations,
-);
+cockpitCaseRoutes.use("/v1/cockpit/*", requireStaffAuth, requireTenancy, requireWriterOnMutations);
 
 const NudgeBody = z.object({
   channel: z.enum(["sms", "email", "sms_and_email"]),
@@ -241,66 +236,61 @@ cockpitCaseRoutes.post(
   },
 );
 
-cockpitCaseRoutes.post(
-  "/v1/cockpit/cases/:caseId/references/:referenceId/resend",
-  async (c) => {
-    const auth = c.var.staffAuth;
-    const caseId = c.req.param("caseId");
-    const referenceId = c.req.param("referenceId");
+cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/references/:referenceId/resend", async (c) => {
+  const auth = c.var.staffAuth;
+  const caseId = c.req.param("caseId");
+  const referenceId = c.req.param("referenceId");
 
-    const detail = await withTenancy(c.var.tenancy, async (tx) => {
-      const [row] = await tx
-        .select({
-          id: schema.references.id,
-          name: schema.references.name,
-          email: schema.references.email,
-          status: schema.references.status,
-        })
-        .from(schema.references)
-        .where(
-          and(eq(schema.references.id, referenceId), eq(schema.references.caseId, caseId)),
-        )
-        .limit(1);
-      return row ?? null;
-    });
-    if (!detail) return notFoundResponse(c);
+  const detail = await withTenancy(c.var.tenancy, async (tx) => {
+    const [row] = await tx
+      .select({
+        id: schema.references.id,
+        name: schema.references.name,
+        email: schema.references.email,
+        status: schema.references.status,
+      })
+      .from(schema.references)
+      .where(and(eq(schema.references.id, referenceId), eq(schema.references.caseId, caseId)))
+      .limit(1);
+    return row ?? null;
+  });
+  if (!detail) return notFoundResponse(c);
 
-    // Mint a single-use token so the email contains an actionable link to the
-    // public reference form. The watcher script greps for `magic_link.issued`
-    // and extracts the URL for the tester.
-    const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
-    const { token } = await issueReferenceToken({
+  // Mint a single-use token so the email contains an actionable link to the
+  // public reference form. The watcher script greps for `magic_link.issued`
+  // and extracts the URL for the tester.
+  const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  const { token } = await issueReferenceToken({
+    referenceId,
+    workspaceId: c.var.tenancy.workspaceId,
+    expiresAt,
+  });
+  const url = new URL(`/reference/${token}`, env().WEB_PUBLIC_URL).toString();
+
+  await audit({
+    workspaceId: c.var.tenancy.workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "reference.resent",
+    targetEntityType: "reference",
+    targetEntityId: referenceId,
+    after: { caseId, url, expiresAt: expiresAt.toISOString() },
+    requestId: c.var.requestId,
+  });
+  // Watcher-shaped log line so scripts/magic-link-watch.sh surfaces the URL.
+  logger.info(
+    {
+      action: "reference.magic_link.issued",
+      caseId,
       referenceId,
-      workspaceId: c.var.tenancy.workspaceId,
-      expiresAt,
-    });
-    const url = new URL(`/reference/${token}`, env().WEB_PUBLIC_URL).toString();
+      email: detail.email ?? null,
+      url,
+    },
+    "reference_magic_link_issued",
+  );
 
-    await audit({
-      workspaceId: c.var.tenancy.workspaceId,
-      actorUserId: auth.session.userId,
-      actorType: "user",
-      action: "reference.resent",
-      targetEntityType: "reference",
-      targetEntityId: referenceId,
-      after: { caseId, url, expiresAt: expiresAt.toISOString() },
-      requestId: c.var.requestId,
-    });
-    // Watcher-shaped log line so scripts/magic-link-watch.sh surfaces the URL.
-    logger.info(
-      {
-        action: "reference.magic_link.issued",
-        caseId,
-        referenceId,
-        email: detail.email ?? null,
-        url,
-      },
-      "reference_magic_link_issued",
-    );
-
-    return c.json({ url, expiresAt: expiresAt.toISOString() });
-  },
-);
+  return c.json({ url, expiresAt: expiresAt.toISOString() });
+});
 
 // ─── POST /v1/cockpit/cases/:caseId/invite-provider ───────────────────
 // Mint a fresh case-access token for the provider on this case, log a
@@ -423,32 +413,28 @@ const BulkNudgeBody = z.object({
   message: z.string().min(1).max(320),
 });
 
-cockpitCaseRoutes.post(
-  "/v1/cockpit/bulk-nudge",
-  zValidator("json", BulkNudgeBody),
-  async (c) => {
-    const auth = c.var.staffAuth;
-    const body = c.req.valid("json");
+cockpitCaseRoutes.post("/v1/cockpit/bulk-nudge", zValidator("json", BulkNudgeBody), async (c) => {
+  const auth = c.var.staffAuth;
+  const body = c.req.valid("json");
 
-    // Filter to caseIds that belong to the workspace; silently drop the rest
-    // so a partial payload doesn't 404 the whole batch.
-    const targets = await withTenancy(c.var.tenancy, async (tx) => {
-      const rows = await tx.select({ id: schema.cases.id }).from(schema.cases);
-      const inSet = new Set(body.caseIds);
-      return rows.map((r) => r.id).filter((id) => inSet.has(id));
-    });
+  // Filter to caseIds that belong to the workspace; silently drop the rest
+  // so a partial payload doesn't 404 the whole batch.
+  const targets = await withTenancy(c.var.tenancy, async (tx) => {
+    const rows = await tx.select({ id: schema.cases.id }).from(schema.cases);
+    const inSet = new Set(body.caseIds);
+    return rows.map((r) => r.id).filter((id) => inSet.has(id));
+  });
 
-    await audit({
-      workspaceId: c.var.tenancy.workspaceId,
-      actorUserId: auth.session.userId,
-      actorType: "user",
-      action: "case.bulk_nudge_sent",
-      targetEntityType: "case",
-      targetEntityId: targets[0] ?? "00000000-0000-0000-0000-000000000000",
-      after: { requestedCount: body.caseIds.length, dispatchedCount: targets.length },
-      requestId: c.var.requestId,
-    });
+  await audit({
+    workspaceId: c.var.tenancy.workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "case.bulk_nudge_sent",
+    targetEntityType: "case",
+    targetEntityId: targets[0] ?? "00000000-0000-0000-0000-000000000000",
+    after: { requestedCount: body.caseIds.length, dispatchedCount: targets.length },
+    requestId: c.var.requestId,
+  });
 
-    return new Response(null, { status: 204 });
-  },
-);
+  return new Response(null, { status: 204 });
+});

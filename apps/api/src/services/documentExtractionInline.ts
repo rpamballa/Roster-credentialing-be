@@ -10,10 +10,10 @@
 
 import { createHash } from "node:crypto";
 import {
-  classifyDocument,
-  extractByType,
   type DocumentContent,
   type SupportedMediaType,
+  classifyDocument,
+  extractByType,
 } from "@cred/ai";
 import { db, schema } from "@cred/db";
 import { audit, logger } from "@cred/observability";
@@ -84,9 +84,7 @@ export interface InlineExtractionContext {
  *      `document.extracted`.
  *   6. On error: mark `failed` + audit `document.extraction_failed`.
  */
-export async function advanceDocumentExtractionInline(
-  ctx: InlineExtractionContext,
-): Promise<void> {
+export async function advanceDocumentExtractionInline(ctx: InlineExtractionContext): Promise<void> {
   // ── 1. load ────────────────────────────────────────────────────────────
   // rls: bypass — background path scoped by documentId; workspace passed
   // explicitly via ctx and used only for audit + AI call routing.

@@ -115,44 +115,41 @@ cockpitFacilityRoutes.post(
   },
 );
 
-cockpitFacilityRoutes.post(
-  "/v1/cockpit/facilities/ingest/:jobId/uploaded",
-  async (c) => {
-    const auth = c.var.staffAuth;
-    const jobId = c.req.param("jobId");
+cockpitFacilityRoutes.post("/v1/cockpit/facilities/ingest/:jobId/uploaded", async (c) => {
+  const auth = c.var.staffAuth;
+  const jobId = c.req.param("jobId");
 
-    const job = await withTenancy(c.var.tenancy, async (tx) => {
-      const [row] = await tx
-        .select()
-        .from(schema.ingestJobs)
-        .where(eq(schema.ingestJobs.id, jobId))
-        .limit(1);
-      return row ?? null;
-    });
-    if (!job) return notFoundResponse(c);
+  const job = await withTenancy(c.var.tenancy, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.ingestJobs)
+      .where(eq(schema.ingestJobs.id, jobId))
+      .limit(1);
+    return row ?? null;
+  });
+  if (!job) return notFoundResponse(c);
 
-    // Kick off the Temporal workflow when configured; otherwise advance the
-    // job inline so the cockpit's status poller sees progress. The activity
-    // already exists (apps/workers/src/activities/facilityIngest.ts) but is
-    // wired to inbound emails. Until the worker accepts a direct ingest
-    // input, fall through to the inline advancer.
-    advanceIngestJobInline(jobId).catch((err: unknown) =>
-      logger.error({ jobId, err }, "ingest_job_inline_advance_failed"),
-    );
+  // Kick off the Temporal workflow when configured; otherwise advance the
+  // job inline so the cockpit's status poller sees progress. The activity
+  // already exists (apps/workers/src/activities/facilityIngest.ts) but is
+  // wired to inbound emails. Until the worker accepts a direct ingest
+  // input, fall through to the inline advancer.
+  advanceIngestJobInline(jobId).catch((err: unknown) =>
+    logger.error({ jobId, err }, "ingest_job_inline_advance_failed"),
+  );
 
-    await audit({
-      workspaceId: c.var.tenancy.workspaceId,
-      actorUserId: auth.session.userId,
-      actorType: "user",
-      action: "facility_ingest.uploaded",
-      targetEntityType: "ingest_job",
-      targetEntityId: jobId,
-      requestId: c.var.requestId,
-    });
+  await audit({
+    workspaceId: c.var.tenancy.workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "facility_ingest.uploaded",
+    targetEntityType: "ingest_job",
+    targetEntityId: jobId,
+    requestId: c.var.requestId,
+  });
 
-    return c.json({ ingestJobId: jobId, status: job.status });
-  },
-);
+  return c.json({ ingestJobId: jobId, status: job.status });
+});
 
 cockpitFacilityRoutes.get("/v1/cockpit/facilities/ingest/:jobId", async (c) => {
   const jobId = c.req.param("jobId");
@@ -175,81 +172,78 @@ cockpitFacilityRoutes.get("/v1/cockpit/facilities/ingest/:jobId", async (c) => {
   });
 });
 
-cockpitFacilityRoutes.post(
-  "/v1/cockpit/facilities/:facilityProfileId/approve",
-  async (c) => {
-    const auth = c.var.staffAuth;
-    const facilityProfileId = c.req.param("facilityProfileId");
+cockpitFacilityRoutes.post("/v1/cockpit/facilities/:facilityProfileId/approve", async (c) => {
+  const auth = c.var.staffAuth;
+  const facilityProfileId = c.req.param("facilityProfileId");
 
-    const updated = await withTenancy(c.var.tenancy, async (tx) => {
-      const [row] = await tx
-        .select()
-        .from(schema.facilityProfiles)
-        .where(
-          and(
-            eq(schema.facilityProfiles.id, facilityProfileId),
-            eq(schema.facilityProfiles.workspaceId, c.var.tenancy.workspaceId),
-          ),
-        )
-        .limit(1);
-      if (!row) return null;
-      if (row.status !== "draft" && row.status !== "in_review") {
-        return { conflict: true as const, status: row.status };
-      }
-      const [next] = await tx
-        .update(schema.facilityProfiles)
-        .set({
-          status: "approved",
-          approvedAt: new Date(),
-          approvedBy: auth.session.userId,
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.facilityProfiles.id, facilityProfileId))
-        .returning({
-          id: schema.facilityProfiles.id,
-          version: schema.facilityProfiles.version,
-          requirements: schema.facilityProfiles.requirements,
-        });
-      if (next) {
-        await tx.insert(schema.facilityProfileVersions).values({
-          facilityProfileId: next.id,
-          workspaceId: c.var.tenancy.workspaceId,
-          version: next.version,
-          requirements: next.requirements,
-          approvedAt: new Date(),
-          approvedBy: auth.session.userId,
-        });
-      }
-      return { conflict: false as const, before: row.status };
-    });
+  const updated = await withTenancy(c.var.tenancy, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.facilityProfiles)
+      .where(
+        and(
+          eq(schema.facilityProfiles.id, facilityProfileId),
+          eq(schema.facilityProfiles.workspaceId, c.var.tenancy.workspaceId),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    if (row.status !== "draft" && row.status !== "in_review") {
+      return { conflict: true as const, status: row.status };
+    }
+    const [next] = await tx
+      .update(schema.facilityProfiles)
+      .set({
+        status: "approved",
+        approvedAt: new Date(),
+        approvedBy: auth.session.userId,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.facilityProfiles.id, facilityProfileId))
+      .returning({
+        id: schema.facilityProfiles.id,
+        version: schema.facilityProfiles.version,
+        requirements: schema.facilityProfiles.requirements,
+      });
+    if (next) {
+      await tx.insert(schema.facilityProfileVersions).values({
+        facilityProfileId: next.id,
+        workspaceId: c.var.tenancy.workspaceId,
+        version: next.version,
+        requirements: next.requirements,
+        approvedAt: new Date(),
+        approvedBy: auth.session.userId,
+      });
+    }
+    return { conflict: false as const, before: row.status };
+  });
 
-    if (updated === null) return notFoundResponse(c);
-    if (updated.conflict)
-      return c.json(
-        {
-          type: "https://errors.cred/cockpit/facility_profile_not_pending",
-          title: "facility profile not pending review",
-          status: 409,
-          instance: c.var.requestId,
-        },
-        409,
-      );
+  if (updated === null) return notFoundResponse(c);
+  if (updated.conflict)
+    return c.json(
+      {
+        type: "https://errors.cred/cockpit/facility_profile_not_pending",
+        title: "facility profile not pending review",
+        status: 409,
+        instance: c.var.requestId,
+      },
+      409,
+    );
 
-    await audit({
-      workspaceId: c.var.tenancy.workspaceId,
-      actorUserId: auth.session.userId,
-      actorType: "user",
-      action: "facility_profile.approved",
-      targetEntityType: "facility_profile",
-      targetEntityId: facilityProfileId,
-      before: { status: updated.before },
-      after: { status: "approved" },
-      requestId: c.var.requestId,
-    });
+  await audit({
+    workspaceId: c.var.tenancy.workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "facility_profile.approved",
+    targetEntityType: "facility_profile",
+    targetEntityId: facilityProfileId,
+    before: { status: updated.before },
+    after: { status: "approved" },
+    requestId: c.var.requestId,
+  });
 
-    return new Response(null, { status: 204 });
-  },
-);
+  return new Response(null, { status: 204 });
+});
 
 function notFoundResponse(c: Context<ApiBindings>): Response {
   return c.json(

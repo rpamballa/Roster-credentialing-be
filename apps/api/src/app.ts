@@ -6,20 +6,20 @@ import { sessionLoader } from "./middleware/session.js";
 import { requireTenancy } from "./middleware/tenancy.js";
 import { attestationRoutes } from "./routes/attestations.js";
 import { authRoutes } from "./routes/auth.js";
-// 🚨 DEMO AUTH — remove this import + the `mountDemoAuth(app)` call below
-// before deploying to production. See routes/demoAuth.ts.
-import { mountDemoAuth } from "./routes/demoAuth.js";
+import { caseRoutes } from "./routes/cases.js";
 import { cockpitCaseRoutes } from "./routes/cockpitCases.js";
 import { cockpitFacilityRoutes } from "./routes/cockpitFacilities.js";
 import { cockpitOutreachRoutes } from "./routes/cockpitOutreach.js";
 import { cockpitProviderRoutes } from "./routes/cockpitProviders.js";
+// 🚨 DEMO AUTH — remove this import + the `mountDemoAuth(app)` call below
+// before deploying to production. See routes/demoAuth.ts.
+import { mountDemoAuth } from "./routes/demoAuth.js";
 import { graphqlHandler } from "./routes/graphql.js";
 import { healthRoutes } from "./routes/health.js";
 import { marketingLeadRoutes } from "./routes/marketingLeads.js";
 import { meRoutes } from "./routes/me.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { packetRoutes } from "./routes/packet.js";
-import { caseRoutes } from "./routes/cases.js";
 import { providerRoutes } from "./routes/provider.js";
 import { referenceRoutes } from "./routes/reference.js";
 import { supportRoutes } from "./routes/support.js";
