@@ -7,9 +7,7 @@ import { toFeDocumentType } from "../mappings.js";
 import { mapExtractedFields } from "./caseDetail.js";
 import type { DocumentReviewGql } from "./types.js";
 
-function mapExtractionStatus(
-  status: string,
-): "pending" | "processing" | "ready" | "failed" {
+function mapExtractionStatus(status: string): "pending" | "processing" | "ready" | "failed" {
   switch (status) {
     case "running":
       return "processing";
@@ -30,7 +28,11 @@ export async function documentReviewResolver(
 ): Promise<DocumentReviewGql | null> {
   const row = await withTenancy(ctx.tenancy, async (tx) => {
     const [cs] = await tx
-      .select({ id: schema.cases.id, providerId: schema.cases.providerId, openedAt: schema.cases.openedAt })
+      .select({
+        id: schema.cases.id,
+        providerId: schema.cases.providerId,
+        openedAt: schema.cases.openedAt,
+      })
       .from(schema.cases)
       .where(
         and(

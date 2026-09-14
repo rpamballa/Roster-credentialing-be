@@ -15,13 +15,13 @@ import { randomUUID } from "node:crypto";
 import { db, schema, withTenancy } from "@cred/db";
 import { audit } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
-import type {
-  DocumentType as BeDocumentType,
-  ExtractedField,
-  ExtractionStatus as BeExtractionStatus,
-  CaseStatus as BeCaseStatus,
-} from "@cred/types/domain";
 import type { FacilityRequirements } from "@cred/types";
+import type {
+  CaseStatus as BeCaseStatus,
+  DocumentType as BeDocumentType,
+  ExtractionStatus as BeExtractionStatus,
+  ExtractedField,
+} from "@cred/types/domain";
 import { zValidator } from "@hono/zod-validator";
 import { and, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -128,7 +128,9 @@ interface FeExtractedField {
   bbox?: { page: number; bbox: [number, number, number, number] };
 }
 
-function projectExtractedFields(raw: ExtractedField[] | null | undefined): FeExtractedField[] | undefined {
+function projectExtractedFields(
+  raw: ExtractedField[] | null | undefined,
+): FeExtractedField[] | undefined {
   if (!raw) return undefined;
   return raw.map((f) => ({
     key: f.name,
@@ -209,7 +211,12 @@ const SignUploadSchema = z.object({
     "malpractice_insurance",
   ]),
   mimeType: z.string().min(1).max(128),
-  sizeBytes: z.number().int().nonnegative().max(64 * 1024 * 1024).optional(),
+  sizeBytes: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(64 * 1024 * 1024)
+    .optional(),
   originalFilename: z.string().min(1).max(255).optional(),
 });
 
@@ -236,18 +243,16 @@ caseRoutes.post(
     const beDocumentType = FE_TO_BE_DOC_TYPE[body.documentType];
 
     await withTenancy(tenancy, async (tx) => {
-      await tx
-        .insert(schema.documents)
-        .values({
-          id: documentId,
-          providerId: auth.session.providerId,
-          documentType: beDocumentType,
-          fileUri,
-          originalFilename: body.originalFilename ?? null,
-          mimeType: body.mimeType,
-          source: "provider_upload",
-          extractionStatus: "pending",
-        });
+      await tx.insert(schema.documents).values({
+        id: documentId,
+        providerId: auth.session.providerId,
+        documentType: beDocumentType,
+        fileUri,
+        originalFilename: body.originalFilename ?? null,
+        mimeType: body.mimeType,
+        source: "provider_upload",
+        extractionStatus: "pending",
+      });
     });
 
     await audit({
@@ -288,7 +293,10 @@ const UploadedSchema = z
 
 caseRoutes.post(
   "/v1/cases/:caseId/documents/:docId/uploaded",
-  zValidator("json", UploadedSchema.transform((v) => v ?? {})),
+  zValidator(
+    "json",
+    UploadedSchema.transform((v) => v ?? {}),
+  ),
   async (c) => {
     const guard = assertSessionOwnsCase(c);
     if (guard) return guard;
@@ -341,11 +349,7 @@ caseRoutes.post(
 
     const [updated] = await withTenancy(tenancy, async (tx) => {
       if (Object.keys(updates).length === 0) {
-        return tx
-          .select()
-          .from(schema.documents)
-          .where(eq(schema.documents.id, docId))
-          .limit(1);
+        return tx.select().from(schema.documents).where(eq(schema.documents.id, docId)).limit(1);
       }
       return tx
         .update(schema.documents)
@@ -570,95 +574,89 @@ const ReuseSchema = z.object({
     .optional(),
 });
 
-caseRoutes.post(
-  "/v1/cases/:caseId/documents/reuse",
-  zValidator("json", ReuseSchema),
-  async (c) => {
-    const guard = assertSessionOwnsCase(c);
-    if (guard) return guard;
-    const auth = c.var.providerAuth;
-    const tenancy = c.var.tenancy;
-    const { sourceDocumentId, documentType: feDocType } = c.req.valid("json");
+caseRoutes.post("/v1/cases/:caseId/documents/reuse", zValidator("json", ReuseSchema), async (c) => {
+  const guard = assertSessionOwnsCase(c);
+  if (guard) return guard;
+  const auth = c.var.providerAuth;
+  const tenancy = c.var.tenancy;
+  const { sourceDocumentId, documentType: feDocType } = c.req.valid("json");
 
-    const inserted = await withTenancy(tenancy, async (tx) => {
-      // Source row ownership: must belong to this provider.
-      const [src] = await tx
-        .select()
-        .from(schema.documents)
-        .where(
-          and(
-            eq(schema.documents.id, sourceDocumentId),
-            eq(schema.documents.providerId, auth.session.providerId),
-          ),
-        )
-        .limit(1);
-      if (!src) return null;
+  const inserted = await withTenancy(tenancy, async (tx) => {
+    // Source row ownership: must belong to this provider.
+    const [src] = await tx
+      .select()
+      .from(schema.documents)
+      .where(
+        and(
+          eq(schema.documents.id, sourceDocumentId),
+          eq(schema.documents.providerId, auth.session.providerId),
+        ),
+      )
+      .limit(1);
+    if (!src) return null;
 
-      const beDocType: BeDocumentType = feDocType
-        ? FE_TO_BE_DOC_TYPE[feDocType]
-        : src.documentType;
+    const beDocType: BeDocumentType = feDocType ? FE_TO_BE_DOC_TYPE[feDocType] : src.documentType;
 
-      const [row] = await tx
-        .insert(schema.documents)
-        .values({
-          providerId: auth.session.providerId,
-          documentType: beDocType,
-          fileUri: src.fileUri,
-          contentHash: src.contentHash,
-          originalFilename: src.originalFilename,
-          mimeType: src.mimeType,
-          pageCount: src.pageCount,
-          source: "provider_upload",
-          extractionStatus: "succeeded",
-          extractedFields: src.extractedFields,
-          extractedAt: new Date(),
-          confirmedAt: new Date(),
-          expiresAt: src.expiresAt,
-          classifierConfidence: src.classifierConfidence,
-        })
-        .returning();
-      return row ?? null;
-    });
-
-    if (!inserted) {
-      return c.json(
-        { type: "about:blank", title: "Not Found", status: 404, instance: c.var.requestId },
-        404,
-      );
-    }
-
-    await audit({
-      workspaceId: tenancy.workspaceId,
-      actorUserId: null,
-      actorType: "agent",
-      action: "document.reused",
-      targetEntityType: "document",
-      targetEntityId: inserted.id,
-      after: {
+    const [row] = await tx
+      .insert(schema.documents)
+      .values({
         providerId: auth.session.providerId,
-        sourceDocumentId,
-        caseId: auth.session.caseId,
-      },
-      requestId: c.var.requestId,
-    });
+        documentType: beDocType,
+        fileUri: src.fileUri,
+        contentHash: src.contentHash,
+        originalFilename: src.originalFilename,
+        mimeType: src.mimeType,
+        pageCount: src.pageCount,
+        source: "provider_upload",
+        extractionStatus: "succeeded",
+        extractedFields: src.extractedFields,
+        extractedAt: new Date(),
+        confirmedAt: new Date(),
+        expiresAt: src.expiresAt,
+        classifierConfidence: src.classifierConfidence,
+      })
+      .returning();
+    return row ?? null;
+  });
 
-    const summary = projectDocumentSummary(inserted);
-    return c.json({
-      ...(summary ?? {
-        id: inserted.id,
-        type: inserted.documentType,
-        thumbnailUrl: null,
-        pageCount: inserted.pageCount ?? 1,
-        uploadedAt: inserted.uploadedAt.toISOString(),
-        expiresAt: inserted.expiresAt ? inserted.expiresAt.toISOString() : null,
-        extractionStatus: "ready" as const,
-        extractedFields: projectExtractedFields(inserted.extractedFields),
-        reusedFromPriorCase: true,
-      }),
+  if (!inserted) {
+    return c.json(
+      { type: "about:blank", title: "Not Found", status: 404, instance: c.var.requestId },
+      404,
+    );
+  }
+
+  await audit({
+    workspaceId: tenancy.workspaceId,
+    actorUserId: null,
+    actorType: "agent",
+    action: "document.reused",
+    targetEntityType: "document",
+    targetEntityId: inserted.id,
+    after: {
+      providerId: auth.session.providerId,
+      sourceDocumentId,
+      caseId: auth.session.caseId,
+    },
+    requestId: c.var.requestId,
+  });
+
+  const summary = projectDocumentSummary(inserted);
+  return c.json({
+    ...(summary ?? {
+      id: inserted.id,
+      type: inserted.documentType,
+      thumbnailUrl: null,
+      pageCount: inserted.pageCount ?? 1,
+      uploadedAt: inserted.uploadedAt.toISOString(),
+      expiresAt: inserted.expiresAt ? inserted.expiresAt.toISOString() : null,
+      extractionStatus: "ready" as const,
+      extractedFields: projectExtractedFields(inserted.extractedFields),
       reusedFromPriorCase: true,
-    });
-  },
-);
+    }),
+    reusedFromPriorCase: true,
+  });
+});
 
 // ─── 6.9  GET /v1/cases/:caseId/references ───────────────────────────────
 type FeRelationship =
@@ -687,18 +685,27 @@ function projectReference(r: typeof schema.references.$inferSelect): FeReference
     "supervising_physician",
     "training_director",
   ];
-  const relationship = (allowed.includes(r.relationship as FeRelationship)
-    ? (r.relationship as FeRelationship)
-    : "peer_physician") as FeRelationship;
+  const relationship = (
+    allowed.includes(r.relationship as FeRelationship)
+      ? (r.relationship as FeRelationship)
+      : "peer_physician"
+  ) as FeRelationship;
   const status: FeReferenceStatus = (() => {
     const s = (r.status ?? "pending").toLowerCase();
-    if (s === "pending" || s === "sent" || s === "viewed" || s === "completed" || s === "declined") {
+    if (
+      s === "pending" ||
+      s === "sent" ||
+      s === "viewed" ||
+      s === "completed" ||
+      s === "declined"
+    ) {
       return s;
     }
     return "pending";
   })();
   const organization =
-    (r.responseFields && typeof (r.responseFields as Record<string, unknown>).organization === "string"
+    (r.responseFields &&
+    typeof (r.responseFields as Record<string, unknown>).organization === "string"
       ? ((r.responseFields as Record<string, unknown>).organization as string)
       : "") ?? "";
   return {
@@ -719,10 +726,7 @@ caseRoutes.get("/v1/cases/:caseId/references", async (c) => {
   const caseId = c.req.param("caseId");
 
   const rows = await withTenancy(tenancy, async (tx) => {
-    return tx
-      .select()
-      .from(schema.references)
-      .where(eq(schema.references.caseId, caseId));
+    return tx.select().from(schema.references).where(eq(schema.references.caseId, caseId));
   });
 
   return c.json(rows.map(projectReference));
@@ -904,7 +908,10 @@ const SignAttestationSchema = z
 
 caseRoutes.post(
   "/v1/cases/:caseId/attestation/sign",
-  zValidator("json", SignAttestationSchema.transform((v) => v ?? {})),
+  zValidator(
+    "json",
+    SignAttestationSchema.transform((v) => v ?? {}),
+  ),
   async (c) => {
     const guard = assertSessionOwnsCase(c);
     if (guard) return guard;
@@ -1081,8 +1088,7 @@ caseRoutes.get("/v1/cases/:caseId", async (c) => {
   const refsComplete =
     data.refs.length > 0 && data.refs.every((r) => (r.status ?? "").toLowerCase() === "completed");
   const attestationSigned =
-    data.atts.length > 0 &&
-    data.atts.every((a) => (a.status ?? "").toLowerCase() === "completed");
+    data.atts.length > 0 && data.atts.every((a) => (a.status ?? "").toLowerCase() === "completed");
   const isSubmitted =
     data.caseRow.status === "submitted" ||
     data.caseRow.status === "completed" ||

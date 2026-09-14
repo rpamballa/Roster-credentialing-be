@@ -36,9 +36,7 @@ marketingLeadRoutes.post(
   async (c) => {
     const body = c.req.valid("json");
     const ip =
-      c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ??
-      c.req.header("x-real-ip") ??
-      null;
+      c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? c.req.header("x-real-ip") ?? null;
     const userAgent = c.req.header("user-agent")?.slice(0, 500) ?? null;
 
     // `volume` is optional in the schema so /demo can share the endpoint, but
@@ -113,9 +111,7 @@ marketingLeadRoutes.post(
   },
 );
 
-async function sendApplicantConfirmation(
-  body: z.infer<typeof MarketingLeadSchema>,
-): Promise<void> {
+async function sendApplicantConfirmation(body: z.infer<typeof MarketingLeadSchema>): Promise<void> {
   const kind = body.kind;
   const subject =
     kind === "beta"

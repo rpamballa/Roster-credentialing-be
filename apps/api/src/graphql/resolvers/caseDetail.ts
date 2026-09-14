@@ -1,9 +1,9 @@
 import { schema, withTenancy } from "@cred/db";
+import type { FacilityRequirements } from "@cred/types";
 import type {
   Blocker as DomainBlocker,
   ExtractedField as DomainExtractedField,
 } from "@cred/types/domain";
-import type { FacilityRequirements } from "@cred/types";
 import { and, eq } from "drizzle-orm";
 import type { GqlContext } from "../context.js";
 import {
@@ -25,9 +25,7 @@ import type {
 
 const LOW_CONFIDENCE_THRESHOLD = 0.75;
 
-function mapExtractionStatus(
-  status: string,
-): "pending" | "processing" | "ready" | "failed" {
+function mapExtractionStatus(status: string): "pending" | "processing" | "ready" | "failed" {
   switch (status) {
     case "running":
       return "processing";
@@ -43,9 +41,7 @@ function mapExtractionStatus(
 }
 
 function humanizeFieldKey(key: string): string {
-  return key
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (m) => m.toUpperCase());
+  return key.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
 /**
@@ -56,9 +52,7 @@ function humanizeFieldKey(key: string): string {
  * object shapes. Defending against both means one malformed document never
  * 500s an entire case-detail page.
  */
-function normalizeExtractedFields(
-  raw: unknown,
-): DomainExtractedField[] {
+function normalizeExtractedFields(raw: unknown): DomainExtractedField[] {
   if (raw == null) return [];
   if (Array.isArray(raw)) return raw as DomainExtractedField[];
   if (typeof raw !== "object") return [];
@@ -97,30 +91,29 @@ export function mapExtractedFields(
     label: humanizeFieldKey(f.name),
     value: f.value === null ? "" : String(f.value),
     confidence: f.confidence,
-    bbox:
-      f.bbox && typeof f.page === "number"
-        ? { page: f.page, bbox: f.bbox }
-        : null,
+    bbox: f.bbox && typeof f.page === "number" ? { page: f.page, bbox: f.bbox } : null,
   }));
 }
 
 function mapBlockers(blockers: DomainBlocker[] | null | undefined): BlockerGql[] {
   if (!blockers) return [];
-  return blockers
-    .filter((b) => !b.resolvedAt)
-    // GraphQL `Blocker.kind` is non-null; a malformed row with no `type` would
-    // otherwise crash the whole case detail. Drop those rather than 500.
-    .filter((b) => typeof b?.type === "string" && b.type.length > 0)
-    .map(
-      (b, i): BlockerGql => ({
-        id: `blocker_${i}_${b.raisedAt ?? "unknown"}`,
-        kind: b.type,
-        message: b.message ?? "",
-        documentId: null,
-        requirementKey: null,
-        raisedAt: b.raisedAt ?? new Date(0).toISOString(),
-      }),
-    );
+  return (
+    blockers
+      .filter((b) => !b.resolvedAt)
+      // GraphQL `Blocker.kind` is non-null; a malformed row with no `type` would
+      // otherwise crash the whole case detail. Drop those rather than 500.
+      .filter((b) => typeof b?.type === "string" && b.type.length > 0)
+      .map(
+        (b, i): BlockerGql => ({
+          id: `blocker_${i}_${b.raisedAt ?? "unknown"}`,
+          kind: b.type,
+          message: b.message ?? "",
+          documentId: null,
+          requirementKey: null,
+          raisedAt: b.raisedAt ?? new Date(0).toISOString(),
+        }),
+      )
+  );
 }
 
 export async function caseDetailResolver(
@@ -132,7 +125,9 @@ export async function caseDetailResolver(
     const [cs] = await tx
       .select()
       .from(schema.cases)
-      .where(and(eq(schema.cases.id, args.id), eq(schema.cases.workspaceId, ctx.tenancy.workspaceId)))
+      .where(
+        and(eq(schema.cases.id, args.id), eq(schema.cases.workspaceId, ctx.tenancy.workspaceId)),
+      )
       .limit(1);
     if (!cs) return null;
 
@@ -168,10 +163,7 @@ export async function caseDetailResolver(
     }
 
     const docs = prov
-      ? await tx
-          .select()
-          .from(schema.documents)
-          .where(eq(schema.documents.providerId, prov.id))
+      ? await tx.select().from(schema.documents).where(eq(schema.documents.providerId, prov.id))
       : [];
 
     const refs = await tx
@@ -204,9 +196,7 @@ export async function caseDetailResolver(
 
   if (!detail || !detail.prov) return null;
 
-  const target = detail.cs.targetSubmissionDate
-    ? String(detail.cs.targetSubmissionDate)
-    : null;
+  const target = detail.cs.targetSubmissionDate ? String(detail.cs.targetSubmissionDate) : null;
   const dtt = daysToTarget(target);
 
   const reqs = detail.requirements?.required_documents ?? [];
@@ -221,9 +211,7 @@ export async function caseDetailResolver(
     // mapExtractedFields handles the legacy object shape; route through it
     // here so this check can't be tripped by a misshapen row either.
     const matchingFields = mapExtractedFields(matching?.extractedFields ?? null);
-    const lowConfidence = matchingFields.some(
-      (f) => f.confidence < LOW_CONFIDENCE_THRESHOLD,
-    );
+    const lowConfidence = matchingFields.some((f) => f.confidence < LOW_CONFIDENCE_THRESHOLD);
     const expired =
       matching?.expiresAt !== null && matching?.expiresAt !== undefined
         ? matching.expiresAt.getTime() < now
@@ -249,8 +237,7 @@ export async function caseDetailResolver(
           uploadedAt: matching.uploadedAt.toISOString(),
           expiresAt: matching.expiresAt ? matching.expiresAt.toISOString() : null,
           extractionStatus: mapExtractionStatus(matching.extractionStatus),
-          reusedFromPriorCase:
-            matching.uploadedAt.getTime() < detail.cs.openedAt.getTime(),
+          reusedFromPriorCase: matching.uploadedAt.getTime() < detail.cs.openedAt.getTime(),
           extractedFields: mapExtractedFields(matching.extractedFields),
         }
       : null;
@@ -358,4 +345,3 @@ export async function caseDetailResolver(
     readyForSubmission,
   };
 }
-

@@ -45,10 +45,7 @@ async function postToSheet(payload: SupportTicketPayload): Promise<void> {
       signal: AbortSignal.timeout(5000),
     });
     if (!resp.ok) {
-      logger.warn(
-        { ticketId: payload.ticketId, status: resp.status },
-        "support_sheet_post_failed",
-      );
+      logger.warn({ ticketId: payload.ticketId, status: resp.status }, "support_sheet_post_failed");
     }
   } catch (err) {
     logger.warn({ err, ticketId: payload.ticketId }, "support_sheet_post_threw");
@@ -85,10 +82,7 @@ async function postToSlack(payload: SupportTicketPayload): Promise<void> {
       signal: AbortSignal.timeout(5000),
     });
     if (!resp.ok) {
-      logger.warn(
-        { ticketId: payload.ticketId, status: resp.status },
-        "support_slack_post_failed",
-      );
+      logger.warn({ ticketId: payload.ticketId, status: resp.status }, "support_slack_post_failed");
     }
   } catch (err) {
     logger.warn({ err, ticketId: payload.ticketId }, "support_slack_post_threw");

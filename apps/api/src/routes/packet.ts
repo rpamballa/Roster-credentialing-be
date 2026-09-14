@@ -137,8 +137,7 @@ packetRoutes.get("/v1/cockpit/cases/:caseId/packet/preview", async (c) => {
   let packetPage = 1;
   for (const d of docs) {
     const docType = d.documentType as string;
-    const isCritical =
-      requiredTypes.has(docType) || CRITICAL_FALLBACK.has(docType);
+    const isCritical = requiredTypes.has(docType) || CRITICAL_FALLBACK.has(docType);
     const section = humanizeKey(docType);
     // Tolerate both array and object shapes — same defensive normalization
     // as the GraphQL resolver uses for extractedFields.
@@ -146,15 +145,15 @@ packetRoutes.get("/v1/cockpit/cases/:caseId/packet/preview", async (c) => {
     const fieldArray = Array.isArray(rawFields)
       ? rawFields
       : rawFields && typeof rawFields === "object"
-        ? Object.entries(rawFields as Record<string, { value?: unknown; confidence?: unknown }>).map(
-            ([name, entry]) => ({
-              name,
-              value: entry?.value,
-              confidence: typeof entry?.confidence === "number" ? entry.confidence : 0,
-              page: 0,
-              bbox: [0, 0, 1, 0.1] as [number, number, number, number],
-            }),
-          )
+        ? Object.entries(
+            rawFields as Record<string, { value?: unknown; confidence?: unknown }>,
+          ).map(([name, entry]) => ({
+            name,
+            value: entry?.value,
+            confidence: typeof entry?.confidence === "number" ? entry.confidence : 0,
+            page: 0,
+            bbox: [0, 0, 1, 0.1] as [number, number, number, number],
+          }))
         : [];
 
     for (const f of fieldArray as Array<{
@@ -164,8 +163,7 @@ packetRoutes.get("/v1/cockpit/cases/:caseId/packet/preview", async (c) => {
       page?: number;
       bbox?: [number, number, number, number];
     }>) {
-      const valueStr =
-        f.value === null || f.value === undefined ? null : String(f.value);
+      const valueStr = f.value === null || f.value === undefined ? null : String(f.value);
       const conf = typeof f.confidence === "number" ? f.confidence : 0;
       const status: PacketField["status"] = !valueStr
         ? "missing"
@@ -232,7 +230,7 @@ packetRoutes.get("/v1/cockpit/cases/:caseId/packet/preview", async (c) => {
       expiresInSeconds: 15 * 60,
     });
     packetUrl = signed.url;
-    pageCount = Math.max(1, (pkt.provenance?.documentIds?.length ?? 1));
+    pageCount = Math.max(1, pkt.provenance?.documentIds?.length ?? 1);
     generatedAt = pkt.assembledAt.toISOString();
   }
 
@@ -248,9 +246,7 @@ packetRoutes.get("/v1/cockpit/cases/:caseId/packet/preview", async (c) => {
 });
 
 function humanizeKey(key: string): string {
-  return key
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (m) => m.toUpperCase());
+  return key.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
 // GET /cockpit/cases/:caseId/packet — latest packet + a signed download url

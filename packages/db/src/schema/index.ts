@@ -9,6 +9,7 @@ export * from "./documents.js";
 export * from "./cases.js";
 export * from "./aiCalls.js";
 export * from "./caseAccessTokens.js";
+export * from "./providerInviteTokens.js";
 export * from "./facilities.js";
 export * from "./outreach.js";
 export * from "./packets.js";

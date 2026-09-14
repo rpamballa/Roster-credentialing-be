@@ -4,7 +4,7 @@
 // vs the backend's `awaiting_provider`); rather than churn either side, the
 // resolvers translate at the GraphQL boundary.
 
-import type { CaseStatus as DomainCaseStatus, DocumentType } from "@cred/types/domain";
+import type { DocumentType, CaseStatus as DomainCaseStatus } from "@cred/types/domain";
 
 // ─── Case status ─────────────────────────────────────────────────────────
 // Backend canon: intake, in_progress, awaiting_provider, awaiting_references,

@@ -57,37 +57,33 @@ export async function facilityProfileReviewResolver(
     sourcePacketUrl = signed.url;
   }
 
-  const documents: FacilityProfileRequirementDocGql[] =
-    requirements.required_documents.map(
-      (rd, i): FacilityProfileRequirementDocGql => {
-        const feType = toFeDocumentType(rd.type) ?? "medical_license";
-        return {
-          key: `doc_${rd.type}_${i}`,
-          documentType: feType,
-          count: rd.count,
-          attestationRequired: rd.attestation_required,
-          conditions: rd.conditions ?? [],
-          needsReview: inferNeedsReview(Boolean(rd.bbox_citation)),
-          bbox: rd.bbox_citation
-            ? { page: rd.bbox_citation.page, bbox: rd.bbox_citation.bbox }
-            : null,
-        };
-      },
-    );
-
-  const verifications: FacilityProfileVerificationGql[] =
-    requirements.required_verifications.map(
-      (rv, i): FacilityProfileVerificationGql => ({
-        key: `ver_${rv.type}_${i}`,
-        type: rv.type,
-        sourcePriority: rv.source_priority,
-        recencyDays: rv.recency_days,
-        needsReview: inferNeedsReview(Boolean(rv.bbox_citation)),
-        bbox: rv.bbox_citation
-          ? { page: rv.bbox_citation.page, bbox: rv.bbox_citation.bbox }
+  const documents: FacilityProfileRequirementDocGql[] = requirements.required_documents.map(
+    (rd, i): FacilityProfileRequirementDocGql => {
+      const feType = toFeDocumentType(rd.type) ?? "medical_license";
+      return {
+        key: `doc_${rd.type}_${i}`,
+        documentType: feType,
+        count: rd.count,
+        attestationRequired: rd.attestation_required,
+        conditions: rd.conditions ?? [],
+        needsReview: inferNeedsReview(Boolean(rd.bbox_citation)),
+        bbox: rd.bbox_citation
+          ? { page: rd.bbox_citation.page, bbox: rd.bbox_citation.bbox }
           : null,
-      }),
-    );
+      };
+    },
+  );
+
+  const verifications: FacilityProfileVerificationGql[] = requirements.required_verifications.map(
+    (rv, i): FacilityProfileVerificationGql => ({
+      key: `ver_${rv.type}_${i}`,
+      type: rv.type,
+      sourcePriority: rv.source_priority,
+      recencyDays: rv.recency_days,
+      needsReview: inferNeedsReview(Boolean(rv.bbox_citation)),
+      bbox: rv.bbox_citation ? { page: rv.bbox_citation.page, bbox: rv.bbox_citation.bbox } : null,
+    }),
+  );
 
   const attestations: FacilityProfileAttestationGql[] = requirements.attestations.map(
     (a, i): FacilityProfileAttestationGql => ({
@@ -102,8 +98,7 @@ export async function facilityProfileReviewResolver(
   const submission: FacilityProfileSubmissionGql = {
     method: requirements.submission.method,
     recipient: requirements.submission.recipient ?? null,
-    deadlineDaysBeforeEffective:
-      requirements.submission.deadline_days_before_effective ?? null,
+    deadlineDaysBeforeEffective: requirements.submission.deadline_days_before_effective ?? null,
     needsReview: !requirements.submission.recipient,
   };
 

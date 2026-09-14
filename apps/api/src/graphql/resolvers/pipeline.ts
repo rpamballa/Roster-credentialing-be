@@ -20,7 +20,9 @@ function blockerCount(blockers: DomainBlocker[] | null | undefined): number {
 function hasReview(blockers: DomainBlocker[] | null | undefined): boolean {
   if (!blockers) return false;
   return blockers.some(
-    (b) => !b.resolvedAt && (b.type === "low_confidence_field" || b.type === "facility_form_mapping_gap"),
+    (b) =>
+      !b.resolvedAt &&
+      (b.type === "low_confidence_field" || b.type === "facility_form_mapping_gap"),
   );
 }
 
@@ -96,7 +98,7 @@ export async function pipelineCasesResolver(
     const dtt = daysToTarget(target, now);
     const facility = r.facilityProfileId ? facilityMap.get(r.facilityProfileId) : undefined;
     const specialist = r.assignedSpecialistId
-      ? specialistMap.get(r.assignedSpecialistId) ?? null
+      ? (specialistMap.get(r.assignedSpecialistId) ?? null)
       : null;
     const blockers = r.blockers as DomainBlocker[];
     const stage = stageFor(r.status);

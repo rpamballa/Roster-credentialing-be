@@ -21,9 +21,7 @@ function expirationStatus(
   return days <= 60 ? "expiring_soon" : "current";
 }
 
-function mapExtractionStatus(
-  status: string,
-): "pending" | "processing" | "ready" | "failed" {
+function mapExtractionStatus(status: string): "pending" | "processing" | "ready" | "failed" {
   switch (status) {
     case "running":
       return "processing";
@@ -82,27 +80,25 @@ export async function providerResolver(
     return rows.length;
   });
 
-  const documents: ProviderDocumentRowGql[] = documentRows.map(
-    (d): ProviderDocumentRowGql => {
-      const feType = toFeDocumentType(d.documentType) ?? "medical_license";
-      const summary: DocumentSummaryGql = {
-        id: d.id,
-        type: feType,
-        thumbnailUrl: null,
-        pageCount: d.pageCount ?? 1,
-        uploadedAt: d.uploadedAt.toISOString(),
-        expiresAt: d.expiresAt ? d.expiresAt.toISOString() : null,
-        extractionStatus: mapExtractionStatus(d.extractionStatus),
-        reusedFromPriorCase: false,
-        extractedFields: mapExtractedFields(d.extractedFields),
-      };
-      return {
-        document: summary,
-        reuseCount: Math.max(0, caseCount - 1),
-        expirationStatus: expirationStatus(d.expiresAt),
-      };
-    },
-  );
+  const documents: ProviderDocumentRowGql[] = documentRows.map((d): ProviderDocumentRowGql => {
+    const feType = toFeDocumentType(d.documentType) ?? "medical_license";
+    const summary: DocumentSummaryGql = {
+      id: d.id,
+      type: feType,
+      thumbnailUrl: null,
+      pageCount: d.pageCount ?? 1,
+      uploadedAt: d.uploadedAt.toISOString(),
+      expiresAt: d.expiresAt ? d.expiresAt.toISOString() : null,
+      extractionStatus: mapExtractionStatus(d.extractionStatus),
+      reusedFromPriorCase: false,
+      extractedFields: mapExtractedFields(d.extractedFields),
+    };
+    return {
+      document: summary,
+      reuseCount: Math.max(0, caseCount - 1),
+      expirationStatus: expirationStatus(d.expiresAt),
+    };
+  });
 
   const cases = await caseSummariesForProvider(prov.id, ctx);
 

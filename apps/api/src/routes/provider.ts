@@ -1,5 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import { CaseAccessInvalidError, createProviderSession, redeemCaseAccessToken } from "@cred/auth";
+import {
+  CaseAccessInvalidError,
+  ProviderInviteInvalidError,
+  attachProviderToInvite,
+  createProviderSession,
+  hashProviderInviteToken,
+  previewProviderInviteToken,
+  redeemCaseAccessToken,
+  redeemProviderInviteToken,
+} from "@cred/auth";
 import { env } from "@cred/config";
 import { db, schema, withTenancy } from "@cred/db";
 import { audit } from "@cred/observability";
@@ -63,14 +72,32 @@ providerRoutes.post("/provider/auth/redeem", zValidator("json", RedeemSchema), a
   }
 });
 
-// ─── auth: preview — peek at the case behind a token without consuming it ─
-// The provider invite landing page (apps/web/app/(provider)/invite/[token])
-// uses this to show "Hello, Aanya — Northstar has invited you to Mercy
-// Memorial". The token is NOT consumed here; redemption only happens on the
-// /provider/auth/redeem call when the user clicks Begin.
+// ─── auth: preview — peek at the token without consuming it ──────────────
+// Handles both invite kinds:
+//   - "case"      → case_access_tokens (existing per-case invite flow)
+//   - "workspace" → provider_invite_tokens (beta pre-case invite; no case
+//                    exists yet, so we can only greet by workspace + name)
+// The FE renders different landing copy based on `kind` in the response.
+// The token is NOT consumed here; redemption happens on redeem / redeem-invite.
 const PreviewSchema = z.object({ token: z.string().min(32).max(256) });
 providerRoutes.post("/provider/auth/preview", zValidator("json", PreviewSchema), async (c) => {
   const { token } = c.req.valid("json");
+
+  // Try the workspace-invite table first — cheaper single-table lookup.
+  try {
+    const preview = await previewProviderInviteToken(token);
+    const first = preview.fullName?.trim().split(/\s+/)[0] ?? null;
+    return c.json({
+      kind: "workspace",
+      workspaceName: preview.workspaceName,
+      providerFirstName: first,
+      email: preview.email,
+    });
+  } catch (err) {
+    if (!(err instanceof ProviderInviteInvalidError)) throw err;
+    // Fall through to the case-token lookup.
+  }
+
   const hash = createHash("sha256").update(token).digest("hex");
 
   // rls: bypass — pre-session lookup by token hash + case/provider/workspace
@@ -131,6 +158,7 @@ providerRoutes.post("/provider/auth/preview", zValidator("json", PreviewSchema),
   }
 
   return c.json({
+    kind: "case",
     providerFirstName: row.firstName,
     workspaceName: row.workspaceName,
     facilityName,
@@ -144,6 +172,104 @@ providerRoutes.post("/provider/auth/preview", zValidator("json", PreviewSchema),
     targetDate: row.targetSubmissionDate ?? null,
   });
 });
+
+// ─── POST /provider/auth/redeem-invite ────────────────────────────────────
+// Workspace-scope invite redemption. Consumes a provider_invite_tokens row,
+// upserts the providers row (keyed on lower(email); one provider may span
+// multiple workspaces per PROMPT §4.1), and writes a provider_workspace_grants
+// row so the cockpit sees them in /cockpit/providers. Does NOT mint a session:
+// the per-case invite email — sent later when the workspace opens a case for
+// this provider — is what logs them in.
+providerRoutes.post(
+  "/provider/auth/redeem-invite",
+  zValidator("json", PreviewSchema),
+  async (c) => {
+    const { token } = c.req.valid("json");
+    try {
+      const invite = await redeemProviderInviteToken(token);
+      const { firstName, lastName } = splitFullName(invite.fullName);
+
+      // Provider lookup keyed on email (schema §4.1: providers are workspace-
+      // independent; the same email can span agencies). Insert if missing.
+      // rls: bypass — providers is a workspace-independent table; workspace
+      // scoping is enforced by provider_workspace_grants.
+      let providerId: string;
+      const [existing] = await db()
+        .select({ id: schema.providers.id })
+        .from(schema.providers)
+        .where(eq(schema.providers.email, invite.email))
+        .limit(1);
+      if (existing) {
+        providerId = existing.id;
+      } else {
+        const [inserted] = await db()
+          .insert(schema.providers)
+          .values({
+            email: invite.email,
+            firstName,
+            lastName,
+          })
+          .returning({ id: schema.providers.id });
+        if (!inserted) throw new Error("failed to create provider row");
+        providerId = inserted.id;
+      }
+
+      // rls: bypass — the grants table IS the workspace-access check.
+      // ON CONFLICT DO NOTHING makes re-redeeming an already-joined
+      // provider a no-op instead of a 500.
+      await db()
+        .insert(schema.providerWorkspaceGrants)
+        .values({
+          providerId,
+          workspaceId: invite.workspaceId,
+          grantedBy: null,
+        })
+        .onConflictDoNothing();
+
+      await attachProviderToInvite(hashProviderInviteToken(token), providerId);
+
+      await audit({
+        workspaceId: invite.workspaceId,
+        actorUserId: null,
+        actorType: "system",
+        action: "provider_invite.redeemed",
+        targetEntityType: "provider",
+        targetEntityId: providerId,
+        after: { email: invite.email },
+        requestId: c.var.requestId,
+      });
+
+      return c.json({
+        ok: true,
+        providerId,
+        workspaceId: invite.workspaceId,
+        email: invite.email,
+      });
+    } catch (err) {
+      if (err instanceof ProviderInviteInvalidError) {
+        return c.json(
+          {
+            type: "https://errors.cred/provider/invalid-invite",
+            title: "Invalid or expired invite",
+            status: 400,
+            instance: c.var.requestId,
+          },
+          400,
+        );
+      }
+      throw err;
+    }
+  },
+);
+
+function splitFullName(full: string | null): { firstName: string; lastName: string } {
+  const trimmed = (full ?? "").trim();
+  if (!trimmed) return { firstName: "Provider", lastName: "" };
+  const parts = trimmed.split(/\s+/);
+  const first = parts[0] ?? "Provider";
+  const last = parts.slice(1).join(" ");
+  return { firstName: first, lastName: last };
+}
 
 // All routes below need the provider session and the case's workspace
 // tenancy context.
