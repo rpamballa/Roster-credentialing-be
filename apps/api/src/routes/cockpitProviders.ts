@@ -6,7 +6,7 @@ import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import type { DocumentType } from "@cred/types/domain";
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { fromFeDocumentType } from "../graphql/mappings.js";
@@ -301,6 +301,193 @@ async function findOpenInvite(workspaceId: string, email: string) {
     );
   return rows.find((r) => !r.redeemedAt && !r.revokedAt && r.expiresAt.getTime() > now.getTime());
 }
+
+// ─── GET /v1/cockpit/providers/invites ────────────────────────────────────
+// List the workspace's provider invites, newest first. The derived `status`
+// column lets the cockpit render pending / accepted / expired / revoked
+// without every caller re-implementing the same time comparison.
+//
+// Not paginated — the cap of 100 rows is plenty for the beta window; add
+// a proper cursor once real workspaces need it.
+cockpitProviderRoutes.get("/v1/cockpit/providers/invites", async (c) => {
+  const workspaceId = c.var.tenancy.workspaceId;
+
+  // rls: bypass — filtered by workspace_id; no cross-workspace read possible.
+  const rows = await db()
+    .select({
+      id: schema.providerInviteTokens.id,
+      email: schema.providerInviteTokens.email,
+      fullName: schema.providerInviteTokens.fullName,
+      invitedByUserId: schema.providerInviteTokens.invitedByUserId,
+      createdAt: schema.providerInviteTokens.createdAt,
+      expiresAt: schema.providerInviteTokens.expiresAt,
+      redeemedAt: schema.providerInviteTokens.redeemedAt,
+      revokedAt: schema.providerInviteTokens.revokedAt,
+      providerId: schema.providerInviteTokens.providerId,
+    })
+    .from(schema.providerInviteTokens)
+    .where(eq(schema.providerInviteTokens.workspaceId, workspaceId))
+    .orderBy(desc(schema.providerInviteTokens.createdAt))
+    .limit(100);
+
+  const now = Date.now();
+  const invites = rows.map((r) => {
+    let status: "pending" | "accepted" | "expired" | "revoked";
+    if (r.redeemedAt) status = "accepted";
+    else if (r.revokedAt) status = "revoked";
+    else if (r.expiresAt.getTime() < now) status = "expired";
+    else status = "pending";
+    return {
+      id: r.id,
+      email: r.email,
+      fullName: r.fullName,
+      status,
+      invitedAt: r.createdAt.toISOString(),
+      expiresAt: r.expiresAt.toISOString(),
+      redeemedAt: r.redeemedAt?.toISOString() ?? null,
+      revokedAt: r.revokedAt?.toISOString() ?? null,
+      providerId: r.providerId,
+    };
+  });
+
+  return c.json({ invites });
+});
+
+// ─── POST /v1/cockpit/providers/invites/:inviteId/resend ─────────────────
+// Revoke the old token and mint a fresh one (7-day window) for the same
+// email + fullName, then re-send the Resend email. Accepted invites can
+// still be re-issued — sometimes the tester lost their inbox after
+// accepting and needs the case-scoped link path, but until we ship that,
+// re-issuing the workspace invite is the cleanest recovery.
+cockpitProviderRoutes.post("/v1/cockpit/providers/invites/:inviteId/resend", async (c) => {
+  const auth = c.var.staffAuth;
+  const workspaceId = c.var.tenancy.workspaceId;
+  const inviteId = c.req.param("inviteId");
+  const cfg = env();
+
+  // rls: bypass — scoped to workspaceId in the WHERE.
+  const [existing] = await db()
+    .select({
+      email: schema.providerInviteTokens.email,
+      fullName: schema.providerInviteTokens.fullName,
+    })
+    .from(schema.providerInviteTokens)
+    .where(
+      and(
+        eq(schema.providerInviteTokens.id, inviteId),
+        eq(schema.providerInviteTokens.workspaceId, workspaceId),
+      ),
+    )
+    .limit(1);
+  if (!existing) return notFoundResponse(c);
+
+  // Revoke the old — protects against a stale link redeeming after
+  // we've handed the tester a fresh one.
+  await db()
+    .update(schema.providerInviteTokens)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(schema.providerInviteTokens.id, inviteId),
+        eq(schema.providerInviteTokens.workspaceId, workspaceId),
+      ),
+    );
+
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const { token } = await issueProviderInviteToken({
+    workspaceId,
+    email: existing.email,
+    fullName: existing.fullName,
+    invitedByUserId: auth.session.userId,
+    expiresAt,
+  });
+  const url = new URL(`/invite/${token}`, cfg.WEB_PUBLIC_URL).toString();
+
+  logger.info(
+    {
+      action: "auth.provider_invite.magic_link.issued",
+      workspaceId,
+      email: existing.email,
+      url,
+    },
+    "provider_workspace_invite_magic_link_resent",
+  );
+
+  const firstName = existing.fullName?.trim().split(/\s+/)[0] || "there";
+  try {
+    await sendEmail({
+      to: existing.email,
+      subject: "Your Roster Healthcare invite (fresh link)",
+      text:
+        `Hi ${firstName},\n\n` +
+        "Here's a fresh link to accept your Roster Healthcare invite. " +
+        "The previous link has been retired.\n\n" +
+        `${url}\n\n` +
+        "This link expires in 7 days.\n\n" +
+        "— The Roster Healthcare team",
+    });
+  } catch (err) {
+    logger.error(
+      { err, email: existing.email, workspaceId },
+      "provider_workspace_invite_resend_email_failed",
+    );
+  }
+
+  await audit({
+    workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "provider_invite.resent",
+    targetEntityType: "workspace",
+    targetEntityId: workspaceId,
+    after: { email: existing.email, url, expiresAt: expiresAt.toISOString() },
+    requestId: c.var.requestId,
+  });
+
+  return c.json({ url, expiresAt: expiresAt.toISOString() });
+});
+
+// ─── POST /v1/cockpit/providers/invites/:inviteId/revoke ─────────────────
+// Kill a pending invite. Idempotent — revoking an already-revoked or
+// already-redeemed invite is a no-op (returns the current state).
+cockpitProviderRoutes.post("/v1/cockpit/providers/invites/:inviteId/revoke", async (c) => {
+  const auth = c.var.staffAuth;
+  const workspaceId = c.var.tenancy.workspaceId;
+  const inviteId = c.req.param("inviteId");
+
+  // rls: bypass — scoped to workspaceId in the WHERE.
+  const [row] = await db()
+    .update(schema.providerInviteTokens)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(schema.providerInviteTokens.id, inviteId),
+        eq(schema.providerInviteTokens.workspaceId, workspaceId),
+        isNull(schema.providerInviteTokens.revokedAt),
+        isNull(schema.providerInviteTokens.redeemedAt),
+      ),
+    )
+    .returning({
+      id: schema.providerInviteTokens.id,
+      revokedAt: schema.providerInviteTokens.revokedAt,
+      email: schema.providerInviteTokens.email,
+    });
+
+  if (row) {
+    await audit({
+      workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "provider_invite.revoked",
+      targetEntityType: "workspace",
+      targetEntityId: workspaceId,
+      after: { inviteId, email: row.email },
+      requestId: c.var.requestId,
+    });
+  }
+
+  return c.json({ ok: true });
+});
 
 // Silence "declared but never read" — `ProviderInviteInvalidError` is
 // re-exported here for the redemption endpoint to catch typed.
