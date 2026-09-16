@@ -1,8 +1,11 @@
-import { parseFacilityPacket } from "@cred/ai";
+import { extractDocxText, parseFacilityPacket } from "@cred/ai";
 import { db, schema } from "@cred/db";
 import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import { and, desc, eq } from "drizzle-orm";
+
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const DOC_MIME = "application/msword";
 
 /**
  * Inline facility-ingest advancer.
@@ -54,7 +57,6 @@ export async function advanceIngestJobInline(jobId: string): Promise<void> {
       throw new Error(`storage fetch ${response.status}`);
     }
     const buffer = Buffer.from(await response.arrayBuffer());
-    const base64 = buffer.toString("base64");
 
     await db()
       .update(schema.ingestJobs)
@@ -62,14 +64,29 @@ export async function advanceIngestJobInline(jobId: string): Promise<void> {
       .where(eq(schema.ingestJobs.id, jobId));
 
     // ── parse with Opus ────────────────────────────────────────────────
-    if (job.mimeType !== "application/pdf") {
+    // PDF → send as an Anthropic `document` block (native, keeps layout).
+    // .docx → extract plain text via mammoth first, then send as a text
+    //   block. Loses bbox citations but Claude still reads the substance.
+    // .doc (legacy binary) → same path as .docx via mammoth (it converts
+    //   both formats).
+    let requirements: Awaited<ReturnType<typeof parseFacilityPacket>>;
+    if (job.mimeType === "application/pdf") {
+      requirements = await parseFacilityPacket({
+        packetDocument: { base64: buffer.toString("base64"), mediaType: "application/pdf" },
+        workspaceId: job.workspaceId,
+        relatedEntity: { type: "ingest_job", id: job.id },
+      });
+    } else if (job.mimeType === DOCX_MIME || job.mimeType === DOC_MIME) {
+      const text = await extractDocxText(buffer);
+      logger.info({ jobId, chars: text.length }, "docx_text_extracted");
+      requirements = await parseFacilityPacket({
+        packetText: text,
+        workspaceId: job.workspaceId,
+        relatedEntity: { type: "ingest_job", id: job.id },
+      });
+    } else {
       throw new Error(`unsupported mime type for inline parser: ${job.mimeType}`);
     }
-    const requirements = await parseFacilityPacket({
-      packetDocument: { base64, mediaType: "application/pdf" },
-      workspaceId: job.workspaceId,
-      relatedEntity: { type: "ingest_job", id: job.id },
-    });
 
     // ── compute next version for this facility within the workspace ─────
     const prior = await db()

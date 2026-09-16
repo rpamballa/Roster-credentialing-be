@@ -90,6 +90,12 @@ export interface FacilityParseParams {
   /** PDF supplied as base64 + media type. Anthropic processes it natively
    *  via the `document` content block (no client-side page splitting). */
   packetDocument?: { base64: string; mediaType: "application/pdf" };
+  /** Plain-text packet contents — used when the input arrived as a Word
+   *  document (`.docx`) and was text-extracted via mammoth before reaching
+   *  the parser. Loses layout + bboxes; the model gets no citations back
+   *  into the source, so `bbox_citation` fields in the output will be
+   *  absent. Acceptable for beta text-heavy compliance docs. */
+  packetText?: string;
   workspaceId: string;
   /** Generic ledger linkage — replaces the older `sourceEmailId`-only form so
    *  the parser can be driven from any source (email-in, direct upload, …). */
@@ -118,14 +124,29 @@ export async function parseFacilityPacket(
           },
         ]
       : []),
+    ...(params.packetText
+      ? [
+          {
+            type: "text" as const,
+            text:
+              "Packet contents (extracted from a Word document — no page " +
+              "layout available, so bbox_citation fields will be absent):\n\n" +
+              params.packetText,
+          },
+        ]
+      : []),
     {
       type: "text" as const,
       text: "Parse this facility privileging packet. Call extract_requirements with the structured output.",
     },
   ];
 
-  if ((!params.packetImageUrls || params.packetImageUrls.length === 0) && !params.packetDocument) {
-    throw new Error("parseFacilityPacket requires packetImageUrls or packetDocument");
+  if (
+    (!params.packetImageUrls || params.packetImageUrls.length === 0) &&
+    !params.packetDocument &&
+    !params.packetText
+  ) {
+    throw new Error("parseFacilityPacket requires packetImageUrls, packetDocument, or packetText");
   }
 
   const relatedEntity =
