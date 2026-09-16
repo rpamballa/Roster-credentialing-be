@@ -489,6 +489,70 @@ cockpitProviderRoutes.post("/v1/cockpit/providers/invites/:inviteId/revoke", asy
   return c.json({ ok: true });
 });
 
+// ─── GET /v1/cockpit/providers ────────────────────────────────────────────
+// Workspace's provider roster — everyone with an active
+// provider_workspace_grants row for this workspace. Includes an
+// activeCases count derived from the cases table so the roster UI can
+// show "0 active" vs "3 active" without a per-row round trip.
+//
+// Not paginated (100-row cap) — plenty for the beta. Add a cursor when
+// a real agency ships >100 providers.
+cockpitProviderRoutes.get("/v1/cockpit/providers", async (c) => {
+  const workspaceId = c.var.tenancy.workspaceId;
+
+  // rls: bypass — provider_workspace_grants IS the workspace-access
+  // check. Filtering by workspace_id here is the authorization.
+  const rows = await db()
+    .select({
+      id: schema.providers.id,
+      firstName: schema.providers.firstName,
+      lastName: schema.providers.lastName,
+      email: schema.providers.email,
+      npi: schema.providers.npi,
+      specialties: schema.providers.specialties,
+      grantedAt: schema.providerWorkspaceGrants.grantedAt,
+    })
+    .from(schema.providerWorkspaceGrants)
+    .innerJoin(schema.providers, eq(schema.providers.id, schema.providerWorkspaceGrants.providerId))
+    .where(eq(schema.providerWorkspaceGrants.workspaceId, workspaceId))
+    .orderBy(desc(schema.providerWorkspaceGrants.grantedAt))
+    .limit(100);
+
+  // Active-cases per provider — one query, group by provider_id.
+  // "Active" = anything not in a terminal state (completed/withdrawn).
+  const TERMINAL_CASE_STATUSES = new Set(["completed", "withdrawn"] as const);
+  const providerIds = rows.map((r) => r.id);
+  const activeCaseCounts = new Map<string, number>();
+  if (providerIds.length > 0) {
+    // rls: bypass — cases.workspace_id is enforced by the same
+    // workspaceId we're already scoping the roster with.
+    const caseRows = await db()
+      .select({
+        providerId: schema.cases.providerId,
+        status: schema.cases.status,
+      })
+      .from(schema.cases)
+      .where(eq(schema.cases.workspaceId, workspaceId));
+    for (const cr of caseRows) {
+      if (!providerIds.includes(cr.providerId)) continue;
+      if ((TERMINAL_CASE_STATUSES as Set<string>).has(cr.status)) continue;
+      activeCaseCounts.set(cr.providerId, (activeCaseCounts.get(cr.providerId) ?? 0) + 1);
+    }
+  }
+
+  const providers = rows.map((r) => ({
+    id: r.id,
+    fullName: `${r.firstName} ${r.lastName}`.trim() || r.email || "Provider",
+    email: r.email,
+    npi: r.npi,
+    specialties: r.specialties,
+    grantedAt: r.grantedAt.toISOString(),
+    activeCases: activeCaseCounts.get(r.id) ?? 0,
+  }));
+
+  return c.json({ providers });
+});
+
 // Silence "declared but never read" — `ProviderInviteInvalidError` is
 // re-exported here for the redemption endpoint to catch typed.
 export { ProviderInviteInvalidError };
