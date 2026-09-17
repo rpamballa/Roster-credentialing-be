@@ -16,6 +16,91 @@ import type { ApiBindings } from "../types.js";
 const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const DOC_MIME = "application/msword";
 
+// Zod mirror of FacilityRequirements for the requirements PATCH. Kept local
+// to this route rather than reusing the parser's schema — that one has
+// `.default([])` wrappers for tolerating empty AI extractions; on manual
+// admin edits we want stricter validation.
+const DOCUMENT_TYPES = [
+  "medical_license",
+  "dea",
+  "board_certification",
+  "bls",
+  "acls",
+  "medical_school_diploma",
+  "government_id",
+  "vaccination_record",
+  "malpractice_insurance",
+  "cv",
+  "other",
+] as const;
+const VERIFICATION_TYPES = [
+  "state_license",
+  "dea",
+  "npdb",
+  "abms_board",
+  "medical_school",
+  "residency",
+] as const;
+const RequirementsPatch = z.object({
+  required_documents: z.array(
+    z.object({
+      type: z.enum(DOCUMENT_TYPES),
+      count: z.number().int().positive().max(50),
+      conditions: z.array(z.string().max(500)).max(20).optional(),
+      attestation_required: z.boolean(),
+    }),
+  ),
+  required_verifications: z.array(
+    z.object({
+      type: z.enum(VERIFICATION_TYPES),
+      source_priority: z
+        .array(z.enum(["state_board", "npdb", "abms", "manual"]))
+        .min(1)
+        .max(4),
+      recency_days: z.number().int().positive().max(3650),
+    }),
+  ),
+  privilege_delineations: z.array(
+    z.object({
+      specialty: z.string().min(1).max(200),
+      privileges: z.array(
+        z.object({
+          name: z.string().min(1).max(500),
+          requires_volume: z.boolean(),
+          threshold: z
+            .object({
+              count: z.number().int().nonnegative(),
+              period_months: z.number().int().positive().max(120),
+            })
+            .optional(),
+        }),
+      ),
+    }),
+  ),
+  attestations: z.array(
+    z.object({
+      text: z.string().min(1).max(4000),
+      signer_role: z.enum(["provider", "department_chair", "medical_director"]),
+      format: z.enum(["checkbox", "signature", "initials"]),
+    }),
+  ),
+  submission: z.object({
+    method: z.enum(["platform", "email", "fax", "portal"]),
+    recipient: z.string().max(500).optional(),
+    deadline_days_before_effective: z.number().int().nonnegative().max(365).optional(),
+  }),
+  facility_forms: z
+    .array(
+      z.object({
+        form_id: z.string(),
+        name: z.string(),
+        source_uri: z.string(),
+        field_mappings: z.record(z.string(), z.string()),
+      }),
+    )
+    .default([]),
+});
+
 export const cockpitFacilityRoutes = new Hono<ApiBindings>();
 
 cockpitFacilityRoutes.use(
@@ -257,6 +342,64 @@ cockpitFacilityRoutes.get(
         500,
       );
     }
+  },
+);
+
+// ─── PATCH /v1/cockpit/facility-profiles/:facilityProfileId/requirements ──
+// Full-object replacement of the parsed FacilityRequirements. Used by the
+// review-screen edit/add/delete affordances so an admin can correct or fill
+// in what Claude missed (or hallucinated).
+//
+// Reset semantics: because index-based keys (`doc_medical_license_0`) shift
+// when rows are inserted or deleted, we WIPE reviewed_field_keys on any
+// requirements edit. Admin re-ticks — annoying but consistent. Follow-up:
+// stable per-row UUIDs would let us preserve marks across edits.
+cockpitFacilityRoutes.patch(
+  "/v1/cockpit/facility-profiles/:facilityProfileId/requirements",
+  zValidator("json", RequirementsPatch),
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const facilityProfileId = c.req.param("facilityProfileId");
+    const body = c.req.valid("json");
+
+    const updated = await withTenancy(c.var.tenancy, async (tx) => {
+      const [row] = await tx
+        .update(schema.facilityProfiles)
+        .set({
+          // Cast through unknown — the Zod-inferred shape mirrors the
+          // FacilityRequirements type but drizzle wants the type-import.
+          requirements:
+            body as unknown as (typeof schema.facilityProfiles.$inferInsert)["requirements"],
+          reviewedFieldKeys: [],
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.facilityProfiles.id, facilityProfileId),
+            eq(schema.facilityProfiles.workspaceId, c.var.tenancy.workspaceId),
+          ),
+        )
+        .returning({ id: schema.facilityProfiles.id });
+      return row ?? null;
+    });
+    if (!updated) return notFoundResponse(c);
+
+    await audit({
+      workspaceId: c.var.tenancy.workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "facility_profile.requirements_updated",
+      targetEntityType: "facility_profile",
+      targetEntityId: facilityProfileId,
+      after: {
+        documents: body.required_documents.length,
+        verifications: body.required_verifications.length,
+        attestations: body.attestations.length,
+      },
+      requestId: c.var.requestId,
+    });
+
+    return c.json({ ok: true });
   },
 );
 
