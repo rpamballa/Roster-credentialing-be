@@ -188,6 +188,7 @@ export interface FacilityProfileReviewGql {
   sourcePacketUrl: string | null;
   sourcePacketMimeType: string | null;
   sourcePageCount: number;
+  reviewedFieldKeys: string[];
   reviewQueueCount: number;
   requirements: FacilityProfileReviewRequirementsGql;
 }

@@ -151,6 +151,7 @@ export async function facilityProfileReviewResolver(
     sourcePacketUrl,
     sourcePacketMimeType,
     sourcePageCount: 0,
+    reviewedFieldKeys: row.reviewedFieldKeys ?? [],
     reviewQueueCount,
     requirements: {
       documents,
