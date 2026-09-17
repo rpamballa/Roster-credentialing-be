@@ -2,14 +2,12 @@
 // No other file in this repo may import @anthropic-ai/sdk or
 // @anthropic-ai/vertex-sdk. Add capability here and expose it.
 //
-// Runtime uses Vertex AI Claude — the SDK authenticates via Google
-// Cloud ADC (the VM's attached service account carries cloud-platform
-// scope, and roles/aiplatform.user is granted at the project level).
-// No Anthropic API key is required at runtime. Types are still from
-// the base @anthropic-ai/sdk package (identical shape).
-import type Anthropic from "@anthropic-ai/sdk";
-import { APIError } from "@anthropic-ai/sdk";
-import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
+// Runtime path (parked): Vertex AI Claude via @anthropic-ai/vertex-sdk.
+// Reverted 2026-09-17 while Google approves the base_model quota
+// requests on `anthropic-claude-opus` and `anthropic-claude-sonnet`.
+// The vertex-sdk dep stays installed so re-enabling is a one-line
+// swap of getClient() below.
+import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { env } from "@cred/config";
 import { db, schema } from "@cred/db";
 import { logger } from "@cred/observability/logger";
@@ -57,18 +55,12 @@ export interface AnthropicCallResult<T> {
   rawResponse: Anthropic.Message;
 }
 
-let client: AnthropicVertex | undefined;
-function getClient(): AnthropicVertex {
+let client: Anthropic | undefined;
+function getClient(): Anthropic {
   if (!client) {
-    const cfg = env();
-    const projectId = cfg.GCP_PROJECT_ID;
-    if (!projectId) {
-      throw new Error("GCP_PROJECT_ID is not configured — Vertex AI Claude requires a project id");
-    }
-    client = new AnthropicVertex({
-      projectId,
-      region: cfg.VERTEX_REGION,
-    });
+    const apiKey = env().ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not configured");
+    client = new Anthropic({ apiKey });
   }
   return client;
 }
