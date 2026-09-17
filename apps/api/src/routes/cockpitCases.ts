@@ -3,7 +3,7 @@ import { env } from "@cred/config";
 import { schema, withTenancy } from "@cred/db";
 import { audit, logger } from "@cred/observability";
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { requireWriterOnMutations } from "../middleware/rbac.js";
@@ -437,4 +437,311 @@ cockpitCaseRoutes.post("/v1/cockpit/bulk-nudge", zValidator("json", BulkNudgeBod
   });
 
   return new Response(null, { status: 204 });
+});
+
+// ─── GET /v1/cockpit/cases/new/lookups ────────────────────────────────────
+// Populates the "New case" dialog. Returns:
+//   - providers: workspace-scoped (has a provider_workspace_grants row)
+//   - facilities: those with at least one approved facility_profile in this
+//     workspace, plus the id + version of that approved profile so the
+//     new case can pin to it.
+// Colocated with case creation because it exists solely to feed that dialog.
+cockpitCaseRoutes.get("/v1/cockpit/cases/new/lookups", async (c) => {
+  const workspaceId = c.var.tenancy.workspaceId;
+
+  const [providers, facilities] = await withTenancy(c.var.tenancy, async (tx) => {
+    const providerRows = await tx
+      .select({
+        id: schema.providers.id,
+        firstName: schema.providers.firstName,
+        lastName: schema.providers.lastName,
+        email: schema.providers.email,
+      })
+      .from(schema.providers)
+      .innerJoin(
+        schema.providerWorkspaceGrants,
+        eq(schema.providerWorkspaceGrants.providerId, schema.providers.id),
+      )
+      .where(eq(schema.providerWorkspaceGrants.workspaceId, workspaceId))
+      .orderBy(schema.providers.lastName, schema.providers.firstName);
+
+    // For facilities we want one row per facility, with the latest approved
+    // profile pinned. Group in-memory since we only need the max version.
+    const profileRows = await tx
+      .select({
+        profileId: schema.facilityProfiles.id,
+        facilityId: schema.facilityProfiles.facilityId,
+        version: schema.facilityProfiles.version,
+        status: schema.facilityProfiles.status,
+      })
+      .from(schema.facilityProfiles)
+      .where(
+        and(
+          eq(schema.facilityProfiles.workspaceId, workspaceId),
+          eq(schema.facilityProfiles.status, "approved"),
+        ),
+      );
+
+    if (profileRows.length === 0) return [providerRows, []] as const;
+
+    const facilityIds = [...new Set(profileRows.map((r) => r.facilityId))];
+    const facilityRows = await tx
+      .select({ id: schema.facilities.id, name: schema.facilities.name })
+      .from(schema.facilities)
+      .where(inArray(schema.facilities.id, facilityIds));
+    const nameByFacility = new Map(facilityRows.map((r) => [r.id, r.name]));
+
+    const latestByFacility = new Map<string, { profileId: string; version: number }>();
+    for (const row of profileRows) {
+      const current = latestByFacility.get(row.facilityId);
+      if (!current || row.version > current.version) {
+        latestByFacility.set(row.facilityId, {
+          profileId: row.profileId,
+          version: row.version,
+        });
+      }
+    }
+
+    const facilityList = [...latestByFacility.entries()]
+      .map(([facilityId, latest]) => ({
+        id: facilityId,
+        name: nameByFacility.get(facilityId) ?? "Unknown facility",
+        facilityProfileId: latest.profileId,
+        facilityProfileVersion: latest.version,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return [providerRows, facilityList] as const;
+  });
+
+  return c.json({
+    providers: providers.map((p) => ({
+      id: p.id,
+      fullName: `${p.firstName} ${p.lastName}`.trim(),
+      email: p.email,
+    })),
+    facilities,
+  });
+});
+
+// ─── POST /v1/cockpit/cases ───────────────────────────────────────────────
+// Create a new credentialing case (staff-driven matching). Pins the case to
+// the current approved profile version so a later profile edit doesn't move
+// the goalposts on an in-flight case.
+const CreateCaseBody = z.object({
+  providerId: z.string().uuid(),
+  facilityId: z.string().uuid(),
+  specialty: z.string().min(1).max(120),
+  targetSubmissionDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD")
+    .optional(),
+  purpose: z
+    .enum(["initial_appointment", "reappointment", "privileging"])
+    .default("initial_appointment"),
+  // Convenience: if true, also mint a case-access token for the provider
+  // in the same flow so the response includes a magic-link URL. Matches
+  // the behavior of POST /v1/cockpit/cases/:caseId/invite-provider — kept
+  // as a separate call rather than a hard-coded side effect so staff can
+  // create a case without immediately notifying the provider.
+  sendInvite: z.boolean().default(false),
+});
+
+cockpitCaseRoutes.post("/v1/cockpit/cases", zValidator("json", CreateCaseBody), async (c) => {
+  const auth = c.var.staffAuth;
+  const workspaceId = c.var.tenancy.workspaceId;
+  const body = c.req.valid("json");
+
+  // Validate the provider is in this workspace before the insert — the
+  // FK below only enforces existence, not workspace membership.
+  const created = await withTenancy(c.var.tenancy, async (tx) => {
+    const [grant] = await tx
+      .select({ providerId: schema.providerWorkspaceGrants.providerId })
+      .from(schema.providerWorkspaceGrants)
+      .where(
+        and(
+          eq(schema.providerWorkspaceGrants.providerId, body.providerId),
+          eq(schema.providerWorkspaceGrants.workspaceId, workspaceId),
+        ),
+      )
+      .limit(1);
+    if (!grant) return { kind: "provider_not_in_workspace" as const };
+
+    // Facility must have an approved profile in this workspace; pin the
+    // case to that profile's id + version.
+    const approvedRows = await tx
+      .select({
+        profileId: schema.facilityProfiles.id,
+        version: schema.facilityProfiles.version,
+      })
+      .from(schema.facilityProfiles)
+      .where(
+        and(
+          eq(schema.facilityProfiles.facilityId, body.facilityId),
+          eq(schema.facilityProfiles.workspaceId, workspaceId),
+          eq(schema.facilityProfiles.status, "approved"),
+        ),
+      )
+      .orderBy(desc(schema.facilityProfiles.version))
+      .limit(1);
+    const approved = approvedRows[0];
+    if (!approved) return { kind: "no_approved_profile" as const };
+
+    // Reject if an open case already exists for this (provider, facility).
+    // We treat submitted / completed / withdrawn as "done" so a repeat
+    // credentialing is allowed once the previous cycle is closed.
+    const [existingOpen] = await tx
+      .select({ id: schema.cases.id, status: schema.cases.status })
+      .from(schema.cases)
+      .where(
+        and(
+          eq(schema.cases.workspaceId, workspaceId),
+          eq(schema.cases.providerId, body.providerId),
+          eq(schema.cases.facilityProfileId, approved.profileId),
+          sql`${schema.cases.status} NOT IN ('submitted','completed','withdrawn')`,
+        ),
+      )
+      .limit(1);
+    if (existingOpen) {
+      return { kind: "case_already_open" as const, caseId: existingOpen.id };
+    }
+
+    const [row] = await tx
+      .insert(schema.cases)
+      .values({
+        workspaceId,
+        providerId: body.providerId,
+        facilityProfileId: approved.profileId,
+        facilityProfileVersion: String(approved.version),
+        specialty: body.specialty,
+        purpose: body.purpose,
+        status: "intake",
+        targetSubmissionDate: body.targetSubmissionDate ?? null,
+        assignedSpecialistId: auth.session.userId,
+      })
+      .returning({ id: schema.cases.id });
+    if (!row) throw new Error("case insert failed");
+    return {
+      kind: "ok" as const,
+      caseId: row.id,
+      facilityProfileId: approved.profileId,
+      facilityProfileVersion: approved.version,
+    };
+  });
+
+  if (created.kind === "provider_not_in_workspace") {
+    return c.json(
+      {
+        type: "https://errors.cred/cases/provider-not-in-workspace",
+        title: "Provider is not in this workspace",
+        status: 422,
+        instance: c.var.requestId,
+      },
+      422,
+    );
+  }
+  if (created.kind === "no_approved_profile") {
+    return c.json(
+      {
+        type: "https://errors.cred/cases/no-approved-facility-profile",
+        title: "Facility has no approved profile in this workspace",
+        status: 422,
+        instance: c.var.requestId,
+      },
+      422,
+    );
+  }
+  if (created.kind === "case_already_open") {
+    return c.json(
+      {
+        type: "https://errors.cred/cases/already-open",
+        title: "An open case already exists for this provider and facility",
+        status: 409,
+        instance: c.var.requestId,
+        caseId: created.caseId,
+      },
+      409,
+    );
+  }
+
+  await audit({
+    workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "case.created",
+    targetEntityType: "case",
+    targetEntityId: created.caseId,
+    after: {
+      providerId: body.providerId,
+      facilityId: body.facilityId,
+      specialty: body.specialty,
+      purpose: body.purpose,
+      facilityProfileVersion: created.facilityProfileVersion,
+    },
+    requestId: c.var.requestId,
+  });
+
+  // Optional inline invite. Mint the case-access token and log the same
+  // magic-link-shaped audit row the standalone invite endpoint emits so
+  // the watcher script surfaces the URL uniformly.
+  let inviteUrl: string | null = null;
+  let inviteExpiresAt: string | null = null;
+  if (body.sendInvite) {
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const { token } = await issueCaseAccessToken({
+      caseId: created.caseId,
+      providerId: body.providerId,
+      workspaceId,
+      expiresAt,
+      issuedByUserId: auth.session.userId,
+    });
+    inviteUrl = new URL(`/invite/${token}`, env().WEB_PUBLIC_URL).toString();
+    inviteExpiresAt = expiresAt.toISOString();
+
+    // Look up email for the audit / watcher line.
+    const [provider] = await withTenancy(c.var.tenancy, async (tx) =>
+      tx
+        .select({ email: schema.providers.email })
+        .from(schema.providers)
+        .where(eq(schema.providers.id, body.providerId))
+        .limit(1),
+    );
+
+    await audit({
+      workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "auth.provider_invite.magic_link.issued",
+      targetEntityType: "case",
+      targetEntityId: created.caseId,
+      after: {
+        providerId: body.providerId,
+        email: provider?.email ?? null,
+        url: inviteUrl,
+        expiresAt: inviteExpiresAt,
+      },
+      requestId: c.var.requestId,
+    });
+    logger.info(
+      {
+        workspaceId,
+        caseId: created.caseId,
+        providerId: body.providerId,
+        email: provider?.email ?? null,
+        url: inviteUrl,
+        expiresAt: inviteExpiresAt,
+      },
+      "auth.provider_invite.magic_link.issued",
+    );
+  }
+
+  return c.json(
+    {
+      caseId: created.caseId,
+      facilityProfileId: created.facilityProfileId,
+      facilityProfileVersion: created.facilityProfileVersion,
+      invite: inviteUrl ? { url: inviteUrl, expiresAt: inviteExpiresAt } : null,
+    },
+    201,
+  );
 });
