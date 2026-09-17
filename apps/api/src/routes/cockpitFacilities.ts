@@ -260,6 +260,55 @@ cockpitFacilityRoutes.get(
   },
 );
 
+// ─── PATCH /v1/cockpit/facility-profiles/:facilityProfileId/reviewed-fields ─
+// Full-list replacement of the review marks. The FE sends every currently-
+// reviewed key on each write — small payload, avoids add/remove races, and
+// makes "reset all" trivial from the client side.
+const ReviewedFieldsBody = z.object({
+  keys: z.array(z.string().min(1).max(200)).max(500),
+});
+
+cockpitFacilityRoutes.patch(
+  "/v1/cockpit/facility-profiles/:facilityProfileId/reviewed-fields",
+  zValidator("json", ReviewedFieldsBody),
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const facilityProfileId = c.req.param("facilityProfileId");
+    const { keys } = c.req.valid("json");
+
+    const updated = await withTenancy(c.var.tenancy, async (tx) => {
+      const [row] = await tx
+        .update(schema.facilityProfiles)
+        .set({ reviewedFieldKeys: keys, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.facilityProfiles.id, facilityProfileId),
+            eq(schema.facilityProfiles.workspaceId, c.var.tenancy.workspaceId),
+          ),
+        )
+        .returning({
+          id: schema.facilityProfiles.id,
+          reviewedFieldKeys: schema.facilityProfiles.reviewedFieldKeys,
+        });
+      return row ?? null;
+    });
+    if (!updated) return notFoundResponse(c);
+
+    await audit({
+      workspaceId: c.var.tenancy.workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "facility_profile.reviewed_fields_updated",
+      targetEntityType: "facility_profile",
+      targetEntityId: facilityProfileId,
+      after: { count: keys.length },
+      requestId: c.var.requestId,
+    });
+
+    return c.json({ reviewedFieldKeys: updated.reviewedFieldKeys });
+  },
+);
+
 cockpitFacilityRoutes.post("/v1/cockpit/facilities/:facilityProfileId/approve", async (c) => {
   const auth = c.var.staffAuth;
   const facilityProfileId = c.req.param("facilityProfileId");
