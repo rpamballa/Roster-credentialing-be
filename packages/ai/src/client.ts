@@ -141,6 +141,11 @@ export async function anthropicCall<T>(
           outputTokens: resp.usage.output_tokens,
           cachedInputTokens,
           latencyMs,
+          // Raw content blocks — needed to debug when the parsed
+          // output looks empty despite non-zero output_tokens. Safe
+          // to log because Claude's tool_use inputs are our schema
+          // shape, not PHI.
+          content: resp.content,
         },
         "ai_call",
       );
@@ -158,6 +163,14 @@ export async function anthropicCall<T>(
         confidence: params.confidence !== undefined ? Math.round(params.confidence * 10_000) : null,
         relatedEntityType: params.relatedEntity?.type ?? null,
         relatedEntityId: params.relatedEntity?.id ?? null,
+        // Persist prompt + response so we can debug "empty extraction
+        // despite non-zero tokens" without redeploying.
+        promptSnapshot: {
+          system: params.systemPrompt,
+          userContent: params.userContent,
+          ...(params.tools ? { tools: params.tools } : {}),
+        },
+        responseSnapshot: resp,
         error: null,
       });
 
