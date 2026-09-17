@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { convertDocxToHtml } from "@cred/ai";
 import { db, schema, withTenancy } from "@cred/db";
 import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
@@ -11,6 +12,9 @@ import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
 import { advanceIngestJobInline } from "../services/facilityIngestJob.js";
 import type { ApiBindings } from "../types.js";
+
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const DOC_MIME = "application/msword";
 
 export const cockpitFacilityRoutes = new Hono<ApiBindings>();
 
@@ -171,6 +175,90 @@ cockpitFacilityRoutes.get("/v1/cockpit/facilities/ingest/:jobId", async (c) => {
     error: job.error,
   });
 });
+
+// ─── GET /v1/cockpit/facility-profiles/:facilityProfileId/source.html ────
+// Returns the source packet as inline-renderable HTML. Used by the review
+// screen's DocumentViewer when the source is a Word document — react-pdf
+// can't render .docx, so we mammoth-extract into styled HTML the FE
+// injects with dangerouslySetInnerHTML.
+//
+// PDFs are served through the existing signed-URL path in the GraphQL
+// resolver and don't reach here — we 415 them if they do.
+cockpitFacilityRoutes.get(
+  "/v1/cockpit/facility-profiles/:facilityProfileId/source.html",
+  async (c) => {
+    const facilityProfileId = c.req.param("facilityProfileId");
+
+    const detail = await withTenancy(c.var.tenancy, async (tx) => {
+      const [profile] = await tx
+        .select({
+          id: schema.facilityProfiles.id,
+          sourcePacketUri: schema.facilityProfiles.sourcePacketUri,
+        })
+        .from(schema.facilityProfiles)
+        .where(eq(schema.facilityProfiles.id, facilityProfileId))
+        .limit(1);
+      if (!profile) return null;
+      const [job] = await tx
+        .select({ mimeType: schema.ingestJobs.mimeType })
+        .from(schema.ingestJobs)
+        .where(eq(schema.ingestJobs.facilityProfileId, profile.id))
+        .limit(1);
+      return { profile, mimeType: job?.mimeType ?? null };
+    });
+    if (!detail) return c.notFound();
+    if (!detail.profile.sourcePacketUri) return c.notFound();
+
+    const mime = detail.mimeType;
+    if (mime !== DOCX_MIME && mime !== DOC_MIME) {
+      return c.json(
+        {
+          type: "https://errors.cred/facility/source-not-html",
+          title: "Source is not a Word document",
+          status: 415,
+          detail:
+            "Only .docx / .doc sources are rendered as HTML. PDF sources use the signed URL directly.",
+          instance: c.var.requestId,
+        },
+        415,
+      );
+    }
+
+    try {
+      // Round-trip via a signed GET URL so we don't need to give the api
+      // container direct object-storage credentials for reads.
+      const signed = await getObjectStorage().getSignedUrl({
+        key: detail.profile.sourcePacketUri,
+        expiresInSeconds: 5 * 60,
+      });
+      const resp = await fetch(signed.url);
+      if (!resp.ok) throw new Error(`storage fetch ${resp.status}`);
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      const { html, warnings } = await convertDocxToHtml(buffer);
+      if (warnings.length > 0) {
+        logger.info(
+          { facilityProfileId, warnings: warnings.length },
+          "docx_html_conversion_warnings",
+        );
+      }
+      // Wrap in a minimal safe scaffold — no scripts, no external
+      // references. The FE injects this inside a scoped container so
+      // its own tokens control the outer chrome.
+      return c.body(html, 200, { "content-type": "text/html; charset=utf-8" });
+    } catch (err) {
+      logger.error({ err, facilityProfileId }, "facility_source_html_conversion_failed");
+      return c.json(
+        {
+          type: "https://errors.cred/facility/source-conversion-failed",
+          title: "Could not convert Word document to HTML",
+          status: 500,
+          instance: c.var.requestId,
+        },
+        500,
+      );
+    }
+  },
+);
 
 cockpitFacilityRoutes.post("/v1/cockpit/facilities/:facilityProfileId/approve", async (c) => {
   const auth = c.var.staffAuth;

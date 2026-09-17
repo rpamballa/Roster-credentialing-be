@@ -66,6 +66,7 @@ export const cockpitTypeDefs = /* GraphQL */ `
       status: String!
       facility: Facility!
       sourcePacketUrl: String
+      sourcePacketMimeType: String
       sourcePageCount: Int!
       reviewQueueCount: Int!
       requirements: FacilityProfileRequirements!

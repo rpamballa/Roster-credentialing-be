@@ -49,12 +49,25 @@ export async function facilityProfileReviewResolver(
   const requirements = row.requirements as FacilityRequirements;
 
   let sourcePacketUrl: string | null = null;
+  let sourcePacketMimeType: string | null = null;
   if (row.sourcePacketUri) {
     const signed = await getObjectStorage().getSignedUrl({
       key: row.sourcePacketUri,
       expiresInSeconds: 30 * 60,
     });
     sourcePacketUrl = signed.url;
+
+    // Look up the ingest job that produced this profile so the FE can
+    // pick the right viewer (react-pdf for PDFs, mammoth-HTML for Word).
+    // rls: bypass — same workspace scope as facility_profiles.
+    const [job] = await withTenancy(ctx.tenancy, async (tx) =>
+      tx
+        .select({ mimeType: schema.ingestJobs.mimeType })
+        .from(schema.ingestJobs)
+        .where(eq(schema.ingestJobs.facilityProfileId, row.id))
+        .limit(1),
+    );
+    sourcePacketMimeType = job?.mimeType ?? null;
   }
 
   const documents: FacilityProfileRequirementDocGql[] = requirements.required_documents.map(
@@ -131,6 +144,7 @@ export async function facilityProfileReviewResolver(
     status: toFeFacilityProfileStatus(row.status),
     facility: { id: row.facilityId, name: row.name, address: row.address ?? null },
     sourcePacketUrl,
+    sourcePacketMimeType,
     sourcePageCount: 0,
     reviewQueueCount,
     requirements: {

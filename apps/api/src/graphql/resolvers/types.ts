@@ -186,6 +186,7 @@ export interface FacilityProfileReviewGql {
   status: FeFacilityProfileStatus;
   facility: { id: string; name: string; address: string | null };
   sourcePacketUrl: string | null;
+  sourcePacketMimeType: string | null;
   sourcePageCount: number;
   reviewQueueCount: number;
   requirements: FacilityProfileReviewRequirementsGql;
