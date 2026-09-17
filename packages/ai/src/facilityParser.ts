@@ -90,18 +90,64 @@ const RequirementsSchema = z.object({
 });
 
 const SYSTEM = `You are a hospital privileging packet analyst. Given the full
-packet (multiple pages), produce a structured FacilityRequirements object
-describing every requirement the facility imposes on credentialed providers.
+packet (which may be multiple pages), produce a structured
+FacilityRequirements object describing every requirement the facility
+imposes on credentialed providers.
+
+Facilities send two different kinds of documents. Both are valid input:
+
+1. EXPLICIT REQUIREMENTS PACKETS — delineations of privileges, medical
+   staff bylaws, credentialing checklists — that state directly what
+   documents, verifications, and privileges are required.
+
+2. APPLICATION FORMS — the blank forms that providers fill in as PART
+   of applying for privileges. The requirements are IMPLICIT: a form
+   field asking for a specific document number implies the facility
+   requires that document. A disclosure question with a signature
+   block implies an attestation. Small and mid-size facilities often
+   send only their application form because the requirements list
+   lives inside it.
 
 Rules:
-- Cite every extracted field with a bbox_citation pointing to the page and
-  region where the requirement appears in the source packet.
-- Use ONLY the enum values listed in the tool schema. If a packet uses a
-  synonym (e.g., "Driver's License"), map it to the closest enum value.
-- Conservative bias: if a requirement is ambiguous, mark it
-  attestation_required=true and add a "review:<reason>" condition rather than
-  inventing structure that isn't on the page.
-- Bounding boxes are normalized to [0,1] page coordinates.`;
+
+- For EXPLICIT REQUIREMENTS PACKETS — extract the stated requirements
+  directly.
+
+- For APPLICATION FORMS — INFER requirements from what the form asks
+  the applicant to submit. Map common form fields to the tool's enum
+  values, e.g.:
+    * "State Medical License Number", "License Number(s)" → required_documents.medical_license
+    * "DEA Registration Number" (+ any DEA expiration/schedule field) → required_documents.dea
+    * "Board Certification" (+ specialty/subspecialty) → required_documents.board_certification
+    * "NPI Number" → required_verifications.npi (source_priority: ["manual"] is fine when explicit source isn't named)
+    * "Medical School", "Diploma", "Graduation Date" → required_documents.medical_diploma
+    * "Malpractice Insurance", "Carrier / Policy / Coverage / Expiration" → required_documents.malpractice_insurance
+    * "BLS/ACLS" certifications → required_documents.bls / .acls
+    * "Vaccination"/"Immunization Record" → required_documents.vaccination
+    * "SSN", "Government ID", "Driver's License" → required_documents.government_id
+    * A references section asking for N professional references → required_verifications with type "professional_references" (or nearest enum) and source_priority ["manual"]
+    * A malpractice-history / disciplinary-action / criminal-conviction question with an accompanying signature line → attestations, format "signature", signer_role "provider"
+    * The physician certification / signature block at the end → attestations, format "signature", signer_role "provider"
+    * A "Submission Instructions" paragraph naming a channel → submission (method: platform / email / fax / portal, recipient if named)
+
+- Cite every extracted field with a bbox_citation pointing to the page
+  and region where the requirement appears in the source packet. When
+  bbox citations aren't available (Word document text extraction
+  path), omit them — an empty bbox_citation is fine, do not fabricate
+  coordinates.
+
+- Use ONLY the enum values listed in the tool schema. If a packet uses
+  a synonym (e.g., "Driver's License" → government_id), map it to the
+  closest enum value rather than dropping the field.
+
+- Conservative bias: if a requirement is truly ambiguous — you cannot
+  tell whether it's required at all — mark it attestation_required=true
+  and add a "review:<reason>" condition rather than inventing
+  structure that isn't on the page. But do NOT return an empty result
+  just because the input is a form and not a bylaws packet — a form
+  IS the requirements.
+
+- Bounding boxes, when present, are normalized to [0,1] page coordinates.`;
 
 export interface FacilityParseParams {
   /** Image URLs — used for image-based packets (one per page). Mutually
