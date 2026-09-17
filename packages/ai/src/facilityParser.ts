@@ -12,61 +12,81 @@ const BboxCitation = z.object({
   bbox: z.tuple([z.number(), z.number(), z.number(), z.number()]),
 });
 
+// Every top-level field defaults to a sensible empty. This keeps
+// Claude's "I found nothing extractable" case (a tool call with `{}`
+// or with only some fields populated) from failing the whole ingest.
+// The admin can fill missing sections in on the review screen —
+// matches the existing error-card copy: "you can enter the requirements
+// manually after creating the facility".
+const DEFAULT_SUBMISSION = { method: "platform" as const };
+
 const RequirementsSchema = z.object({
-  required_documents: z.array(
-    z.object({
-      type: z.enum(DOCUMENT_TYPES),
-      count: z.number().int().positive(),
-      conditions: z.array(z.string()).optional(),
-      attestation_required: z.boolean(),
-      bbox_citation: BboxCitation.optional(),
-    }),
-  ),
-  required_verifications: z.array(
-    z.object({
-      type: z.enum(VERIFICATION_TYPES),
-      source_priority: z.array(z.enum(["state_board", "npdb", "abms", "manual"])),
-      recency_days: z.number().int().positive(),
-      bbox_citation: BboxCitation.optional(),
-    }),
-  ),
-  privilege_delineations: z.array(
-    z.object({
-      specialty: z.string(),
-      privileges: z.array(
-        z.object({
-          name: z.string(),
-          requires_volume: z.boolean(),
-          threshold: z
-            .object({
-              count: z.number().int().nonnegative(),
-              period_months: z.number().int().positive(),
-            })
-            .optional(),
-        }),
-      ),
-    }),
-  ),
-  attestations: z.array(
-    z.object({
-      text: z.string(),
-      signer_role: z.enum(["provider", "department_chair", "medical_director"]),
-      format: z.enum(["checkbox", "signature", "initials"]),
-    }),
-  ),
-  submission: z.object({
-    method: z.enum(["platform", "email", "fax", "portal"]),
-    recipient: z.string().optional(),
-    deadline_days_before_effective: z.number().int().nonnegative().optional(),
-  }),
-  facility_forms: z.array(
-    z.object({
-      form_id: z.string(),
-      name: z.string(),
-      source_uri: z.string(),
-      field_mappings: z.record(z.string(), z.string()),
-    }),
-  ),
+  required_documents: z
+    .array(
+      z.object({
+        type: z.enum(DOCUMENT_TYPES),
+        count: z.number().int().positive(),
+        conditions: z.array(z.string()).optional(),
+        attestation_required: z.boolean(),
+        bbox_citation: BboxCitation.optional(),
+      }),
+    )
+    .default([]),
+  required_verifications: z
+    .array(
+      z.object({
+        type: z.enum(VERIFICATION_TYPES),
+        source_priority: z.array(z.enum(["state_board", "npdb", "abms", "manual"])),
+        recency_days: z.number().int().positive(),
+        bbox_citation: BboxCitation.optional(),
+      }),
+    )
+    .default([]),
+  privilege_delineations: z
+    .array(
+      z.object({
+        specialty: z.string(),
+        privileges: z.array(
+          z.object({
+            name: z.string(),
+            requires_volume: z.boolean(),
+            threshold: z
+              .object({
+                count: z.number().int().nonnegative(),
+                period_months: z.number().int().positive(),
+              })
+              .optional(),
+          }),
+        ),
+      }),
+    )
+    .default([]),
+  attestations: z
+    .array(
+      z.object({
+        text: z.string(),
+        signer_role: z.enum(["provider", "department_chair", "medical_director"]),
+        format: z.enum(["checkbox", "signature", "initials"]),
+      }),
+    )
+    .default([]),
+  submission: z
+    .object({
+      method: z.enum(["platform", "email", "fax", "portal"]),
+      recipient: z.string().optional(),
+      deadline_days_before_effective: z.number().int().nonnegative().optional(),
+    })
+    .default(DEFAULT_SUBMISSION),
+  facility_forms: z
+    .array(
+      z.object({
+        form_id: z.string(),
+        name: z.string(),
+        source_uri: z.string(),
+        field_mappings: z.record(z.string(), z.string()),
+      }),
+    )
+    .default([]),
 });
 
 const SYSTEM = `You are a hospital privileging packet analyst. Given the full
