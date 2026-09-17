@@ -32,19 +32,21 @@ const EnvSchema = z.object({
   TEMPORAL_NAMESPACE: z.string().default("default"),
   TEMPORAL_TASK_QUEUE: z.string().default("cred-default"),
 
-  // Anthropic access is now via Vertex AI Claude — the client resolves
-  // via Google Cloud ADC (the VM's attached service account) and needs
-  // the project id + region below. Direct Anthropic API is not used
-  // anywhere in the app; ANTHROPIC_API_KEY is kept as a soft-optional
-  // fallback for local scripts that may hit the direct API.
+  // Anthropic access — currently direct via api.anthropic.com. Vertex
+  // AI Claude wiring is intact (packages/ai still depends on the
+  // vertex-sdk) but disabled while Google approves the base_model
+  // quota requests on `anthropic-claude-opus` / `anthropic-claude-sonnet`.
+  // Once quota lands, flip getClient() in packages/ai/src/client.ts
+  // back to AnthropicVertex and switch these defaults to the Vertex
+  // model ID shape (`claude-opus-4-8@default`).
   ANTHROPIC_API_KEY: z.string().optional(),
-  // Region hosting the Claude models on Vertex. `us-central1` and
-  // `us-east5` are the two most-current regions; pick one that matches
-  // the VM's region to avoid cross-region egress.
-  VERTEX_REGION: z.string().default("us-central1"),
-  // Model IDs use Vertex Claude naming: `<name>@<snapshot>`.
-  ANTHROPIC_MODEL_SONNET: z.string().default("claude-sonnet-4@20250514"),
-  ANTHROPIC_MODEL_OPUS: z.string().default("claude-opus-4-1@20250805"),
+  // Kept for forward-compat with the Vertex path (unused by the direct
+  // Anthropic client).
+  VERTEX_REGION: z.string().default("us-east5"),
+  // Direct Anthropic model IDs. `claude-opus-4-7` was confirmed working
+  // against the operator's Anthropic account 2026-09-17.
+  ANTHROPIC_MODEL_SONNET: z.string().default("claude-sonnet-4-6"),
+  ANTHROPIC_MODEL_OPUS: z.string().default("claude-opus-4-7"),
 
   // Resend transactional email — used for magic-link and provider-invite sends.
   // Optional so dev + integration test runs (which don't need real email)
