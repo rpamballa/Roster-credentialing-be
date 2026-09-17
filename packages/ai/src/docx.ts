@@ -18,3 +18,29 @@ export async function extractDocxText(buffer: Buffer): Promise<string> {
   if (!text) throw new Error("Word document contained no extractable text");
   return text;
 }
+
+/**
+ * Convert a Word document (`.docx` / `.doc`) to semantic HTML for inline
+ * display in the review UI. Uses mammoth's built-in style map (h1/h2, p,
+ * ul/ol, table, strong, em) — no inline styles, no external references,
+ * no scripts. The caller injects the returned HTML via
+ * dangerouslySetInnerHTML inside a scoped container.
+ *
+ * Returns `{ html, warnings }` — warnings names any bits mammoth could
+ * not translate cleanly. Non-empty warnings do NOT throw; they're
+ * informational so the caller can log.
+ *
+ * Throws only on: buffer read failure, or empty HTML output.
+ */
+export async function convertDocxToHtml(
+  buffer: Buffer,
+): Promise<{ html: string; warnings: string[] }> {
+  const { value: html, messages } = await mammoth.convertToHtml({ buffer });
+  if (!html || html.trim().length === 0) {
+    throw new Error("Word document produced empty HTML");
+  }
+  return {
+    html,
+    warnings: messages.map((m) => m.message),
+  };
+}
