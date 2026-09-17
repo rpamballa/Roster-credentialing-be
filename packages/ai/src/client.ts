@@ -1,7 +1,15 @@
-// THE SINGLE CHOKEPOINT FOR ANTHROPIC CALLS — PROMPT §4.3.
-// No other file in this repo may import @anthropic-ai/sdk. Add capability
-// here and expose it; do not bypass.
-import Anthropic from "@anthropic-ai/sdk";
+// THE SINGLE CHOKEPOINT FOR CLAUDE CALLS — PROMPT §4.3.
+// No other file in this repo may import @anthropic-ai/sdk or
+// @anthropic-ai/vertex-sdk. Add capability here and expose it.
+//
+// Runtime uses Vertex AI Claude — the SDK authenticates via Google
+// Cloud ADC (the VM's attached service account carries cloud-platform
+// scope, and roles/aiplatform.user is granted at the project level).
+// No Anthropic API key is required at runtime. Types are still from
+// the base @anthropic-ai/sdk package (identical shape).
+import type Anthropic from "@anthropic-ai/sdk";
+import { APIError } from "@anthropic-ai/sdk";
+import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
 import { env } from "@cred/config";
 import { db, schema } from "@cred/db";
 import { logger } from "@cred/observability/logger";
@@ -19,7 +27,16 @@ export interface AnthropicCallParams<T> {
   model: ModelChoice;
   systemPrompt: string;
   userContent: Anthropic.MessageParam["content"];
-  tools?: Anthropic.Tool[];
+  // Deliberately widened. The Anthropic SDK's `Tool["input_schema"]`
+  // requires `required` to be a mutable `string[]`, but our JSON-Schema
+  // constants use `as const` for compile-time enum narrowing which
+  // yields a `readonly` tuple. Anthropic accepts the same JSON shape at
+  // runtime — the mutability mismatch is a TS-only concern.
+  tools?: Array<{
+    name: string;
+    description?: string;
+    input_schema: unknown;
+  }>;
   toolChoice?: Anthropic.MessageCreateParams["tool_choice"];
   expectedSchema?: z.ZodType<T>;
   maxTokens?: number;
@@ -40,12 +57,18 @@ export interface AnthropicCallResult<T> {
   rawResponse: Anthropic.Message;
 }
 
-let client: Anthropic | undefined;
-function getClient(): Anthropic {
+let client: AnthropicVertex | undefined;
+function getClient(): AnthropicVertex {
   if (!client) {
-    const apiKey = env().ANTHROPIC_API_KEY;
-    if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not configured");
-    client = new Anthropic({ apiKey });
+    const cfg = env();
+    const projectId = cfg.GCP_PROJECT_ID;
+    if (!projectId) {
+      throw new Error("GCP_PROJECT_ID is not configured — Vertex AI Claude requires a project id");
+    }
+    client = new AnthropicVertex({
+      projectId,
+      region: cfg.VERTEX_REGION,
+    });
   }
   return client;
 }
@@ -105,7 +128,10 @@ export async function anthropicCall<T>(
         max_tokens: maxTokens,
         system,
         messages: [{ role: "user", content: params.userContent }],
-        ...(params.tools ? { tools: params.tools } : {}),
+        // Cast: tools deliberately widened at the API boundary (see the
+        // comment on AnthropicCallParams.tools). SDK's InputSchema is
+        // stricter than the runtime shape it actually accepts.
+        ...(params.tools ? { tools: params.tools as Anthropic.Tool[] } : {}),
         ...(params.toolChoice ? { tool_choice: params.toolChoice } : {}),
       });
 
@@ -154,7 +180,7 @@ export async function anthropicCall<T>(
       };
     } catch (err) {
       lastErr = err;
-      const status = err instanceof Anthropic.APIError ? err.status : undefined;
+      const status = err instanceof APIError ? err.status : undefined;
       const retriable = status === 429 || (typeof status === "number" && status >= 500);
       if (!retriable || attempt === maxRetries) {
         await logAiCall({
