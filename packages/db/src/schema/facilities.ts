@@ -30,6 +30,12 @@ export const facilityProfiles = pgTable(
     sourcePacketUri: text("source_packet_uri"),
     sourceEmailId: uuid("source_email_id"),
     requirements: jsonb("requirements").$type<FacilityRequirements>().notNull(),
+    /**
+     * Per-field review marks — the field keys the admin has ticked
+     * "Reviewed" on. Empty means nothing has been reviewed yet.
+     * The cockpit's review screen persists these on every tap.
+     */
+    reviewedFieldKeys: text("reviewed_field_keys").array().notNull().default([]),
     approvedAt: timestamp("approved_at", { withTimezone: true }),
     approvedBy: uuid("approved_by").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

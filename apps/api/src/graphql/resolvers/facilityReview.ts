@@ -35,6 +35,7 @@ export async function facilityProfileReviewResolver(
         status: schema.facilityProfiles.status,
         sourcePacketUri: schema.facilityProfiles.sourcePacketUri,
         requirements: schema.facilityProfiles.requirements,
+        reviewedFieldKeys: schema.facilityProfiles.reviewedFieldKeys,
         name: schema.facilities.name,
         address: schema.facilities.address,
       })
@@ -45,6 +46,8 @@ export async function facilityProfileReviewResolver(
     return r ?? null;
   });
   if (!row) return null;
+
+  const reviewedKeys = new Set(row.reviewedFieldKeys ?? []);
 
   const requirements = row.requirements as FacilityRequirements;
 
@@ -79,7 +82,8 @@ export async function facilityProfileReviewResolver(
         count: rd.count,
         attestationRequired: rd.attestation_required,
         conditions: rd.conditions ?? [],
-        needsReview: inferNeedsReview(Boolean(rd.bbox_citation)),
+        needsReview:
+          !reviewedKeys.has(`doc_${rd.type}_${i}`) && inferNeedsReview(Boolean(rd.bbox_citation)),
         bbox: rd.bbox_citation
           ? { page: rd.bbox_citation.page, bbox: rd.bbox_citation.bbox }
           : null,
@@ -93,7 +97,8 @@ export async function facilityProfileReviewResolver(
       type: rv.type,
       sourcePriority: rv.source_priority,
       recencyDays: rv.recency_days,
-      needsReview: inferNeedsReview(Boolean(rv.bbox_citation)),
+      needsReview:
+        !reviewedKeys.has(`ver_${rv.type}_${i}`) && inferNeedsReview(Boolean(rv.bbox_citation)),
       bbox: rv.bbox_citation ? { page: rv.bbox_citation.page, bbox: rv.bbox_citation.bbox } : null,
     }),
   );
@@ -104,7 +109,7 @@ export async function facilityProfileReviewResolver(
       text: a.text,
       signerRole: a.signer_role,
       format: a.format,
-      needsReview: false,
+      needsReview: !reviewedKeys.has(`att_${a.signer_role}_${i}`),
     }),
   );
 
@@ -112,7 +117,7 @@ export async function facilityProfileReviewResolver(
     method: requirements.submission.method,
     recipient: requirements.submission.recipient ?? null,
     deadlineDaysBeforeEffective: requirements.submission.deadline_days_before_effective ?? null,
-    needsReview: !requirements.submission.recipient,
+    needsReview: !reviewedKeys.has("submission") && !requirements.submission.recipient,
   };
 
   const privilegeDelineations: FacilityProfilePrivilegeGroupGql[] =
