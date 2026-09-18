@@ -2,12 +2,23 @@
 // No other file in this repo may import @anthropic-ai/sdk or
 // @anthropic-ai/vertex-sdk. Add capability here and expose it.
 //
-// Runtime path (parked): Vertex AI Claude via @anthropic-ai/vertex-sdk.
-// Reverted 2026-09-17 while Google approves the base_model quota
-// requests on `anthropic-claude-opus` and `anthropic-claude-sonnet`.
-// The vertex-sdk dep stays installed so re-enabling is a one-line
-// swap of getClient() below.
+// Dispatch: per-tier client.
+//   - Opus  → Vertex AI (@anthropic-ai/vertex-sdk) when GCP_PROJECT_ID
+//             is set. Auth is ADC — the VM's service account carries
+//             `roles/aiplatform.user`. Model Garden currently has
+//             `claude-opus-4-8` enabled and the token quota is granted
+//             on `global`.
+//   - Sonnet → direct Anthropic API. No Sonnet 4.x tile is enabled in
+//             the Model Garden yet; when it is, extend `useVertexFor`
+//             below and add the Vertex model id to config.
+// When GCP_PROJECT_ID is unset, both tiers fall through to direct
+// Anthropic (safe local-dev default).
+//
+// Both SDKs speak an identical `messages.create` shape and return
+// `Anthropic.Message`, so the dispatch is a client-picker only — the
+// call site below is unchanged.
 import Anthropic, { APIError } from "@anthropic-ai/sdk";
+import { AnthropicVertex } from "@anthropic-ai/vertex-sdk";
 import { env } from "@cred/config";
 import { db, schema } from "@cred/db";
 import { logger } from "@cred/observability/logger";
@@ -55,14 +66,48 @@ export interface AnthropicCallResult<T> {
   rawResponse: Anthropic.Message;
 }
 
-let client: Anthropic | undefined;
-function getClient(): Anthropic {
-  if (!client) {
+let anthropicClient: Anthropic | undefined;
+let vertexClient: AnthropicVertex | undefined;
+
+function getAnthropicClient(): Anthropic {
+  if (!anthropicClient) {
     const apiKey = env().ANTHROPIC_API_KEY;
     if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not configured");
-    client = new Anthropic({ apiKey });
+    anthropicClient = new Anthropic({ apiKey });
   }
-  return client;
+  return anthropicClient;
+}
+
+function getVertexClient(): AnthropicVertex {
+  if (!vertexClient) {
+    const cfg = env();
+    if (!cfg.GCP_PROJECT_ID) {
+      throw new Error("GCP_PROJECT_ID is not configured — Vertex Claude requires a project id");
+    }
+    vertexClient = new AnthropicVertex({
+      projectId: cfg.GCP_PROJECT_ID,
+      region: cfg.VERTEX_REGION,
+    });
+  }
+  return vertexClient;
+}
+
+// Which tiers should route through Vertex on this deployment. Only
+// tiers whose Model Garden tile is enabled AND whose token quota is
+// granted belong here. Sonnet stays direct-Anthropic until its tile
+// is enabled in the project's Model Garden.
+function useVertexFor(choice: ModelChoice): boolean {
+  if (!env().GCP_PROJECT_ID) return false;
+  return choice === "opus";
+}
+
+/**
+ * Returns the SDK client for the call. Both SDKs expose the same
+ * `messages.create` API shape, so this is typed as the intersection
+ * — the caller does not branch on which one it got back.
+ */
+function getClient(choice: ModelChoice): Anthropic | AnthropicVertex {
+  return useVertexFor(choice) ? getVertexClient() : getAnthropicClient();
 }
 
 function resolveModel(choice: ModelChoice): string {
@@ -115,7 +160,7 @@ export async function anthropicCall<T>(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const start = Date.now();
     try {
-      const resp = await getClient().messages.create({
+      const resp = await getClient(params.model).messages.create({
         model,
         max_tokens: maxTokens,
         system,
