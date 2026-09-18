@@ -84,9 +84,20 @@ function getVertexClient(): AnthropicVertex {
     if (!cfg.GCP_PROJECT_ID) {
       throw new Error("GCP_PROJECT_ID is not configured — Vertex Claude requires a project id");
     }
+    // The @anthropic-ai/vertex-sdk v0.11 builds the request host as
+    // `${region}-aiplatform.googleapis.com`. That works for real regions
+    // (`us-east5-…`) but breaks for `global`, since `global-aiplatform.
+    // googleapis.com` doesn't exist and returns Google's generic 404 HTML
+    // (mistakable at first glance for "model not found"). The real global
+    // endpoint has no region prefix — `aiplatform.googleapis.com`. When
+    // the operator picks `global`, override baseURL to that. The path
+    // segment `.../locations/global/...` still routes correctly.
+    const region = cfg.VERTEX_REGION;
+    const baseURL = region === "global" ? "https://aiplatform.googleapis.com/v1" : undefined;
     vertexClient = new AnthropicVertex({
       projectId: cfg.GCP_PROJECT_ID,
-      region: cfg.VERTEX_REGION,
+      region,
+      ...(baseURL ? { baseURL } : {}),
     });
   }
   return vertexClient;
