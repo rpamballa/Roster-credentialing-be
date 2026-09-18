@@ -32,21 +32,28 @@ const EnvSchema = z.object({
   TEMPORAL_NAMESPACE: z.string().default("default"),
   TEMPORAL_TASK_QUEUE: z.string().default("cred-default"),
 
-  // Anthropic access — currently direct via api.anthropic.com. Vertex
-  // AI Claude wiring is intact (packages/ai still depends on the
-  // vertex-sdk) but disabled while Google approves the base_model
-  // quota requests on `anthropic-claude-opus` / `anthropic-claude-sonnet`.
-  // Once quota lands, flip getClient() in packages/ai/src/client.ts
-  // back to AnthropicVertex and switch these defaults to the Vertex
-  // model ID shape (`claude-opus-4-8@default`).
+  // Claude access — split by tier.
+  //   Opus  → Vertex AI Claude when GCP_PROJECT_ID is set (BAA covered
+  //           by the Google Cloud contract). Model Garden only has
+  //           claude-opus-4-8 enabled today (2026-09-18); the token
+  //           quota was granted on `global` for that base model.
+  //   Sonnet → direct Anthropic API. Sonnet 4.x isn't enabled in this
+  //           project's Model Garden yet; enabling it there is the trigger
+  //           to also route Sonnet through Vertex (see getClient() in
+  //           packages/ai/src/client.ts — the dispatch is per-tier).
+  // ANTHROPIC_API_KEY stays required in practice because Sonnet still
+  // depends on it; kept optional here so pure-Opus deployments (or
+  // tests that only exercise the Opus path) can boot without it.
   ANTHROPIC_API_KEY: z.string().optional(),
-  // Kept for forward-compat with the Vertex path (unused by the direct
-  // Anthropic client).
-  VERTEX_REGION: z.string().default("us-east5"),
-  // Direct Anthropic model IDs. `claude-opus-4-7` was confirmed working
-  // against the operator's Anthropic account 2026-09-17.
+  // Vertex Claude uses the same GCP_PROJECT_ID declared above for GCS.
+  // Vertex Claude region. `global` is the Anthropic-on-Vertex-preferred
+  // endpoint (multi-region routing with better availability) and is
+  // where the token quota on this project was granted.
+  VERTEX_REGION: z.string().default("global"),
+  // Model IDs. Sonnet is a direct-Anthropic id; Opus is the shared name
+  // that both Vertex and direct Anthropic accept.
   ANTHROPIC_MODEL_SONNET: z.string().default("claude-sonnet-4-6"),
-  ANTHROPIC_MODEL_OPUS: z.string().default("claude-opus-4-7"),
+  ANTHROPIC_MODEL_OPUS: z.string().default("claude-opus-4-8"),
 
   // Resend transactional email — used for magic-link and provider-invite sends.
   // Optional so dev + integration test runs (which don't need real email)
