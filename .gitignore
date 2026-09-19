@@ -8,6 +8,8 @@ coverage
 .env
 .env.local
 .env.*.local
+# Local staging env — copy from .env.staging.example, never commit.
+.env.staging
 .DS_Store
 .vscode
 .idea
