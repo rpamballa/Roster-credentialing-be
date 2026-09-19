@@ -545,6 +545,54 @@ cockpitProviderRoutes.get("/v1/cockpit/providers", async (c) => {
   return c.json({ providers });
 });
 
+// ─── GET /v1/cockpit/providers/:providerId/documents/:docId/source ───────
+// Serve a doc-viewer descriptor for a provider-scoped document. Returns
+// the signed GCS read URL, the MIME type, and (best-effort) page count so
+// the FE viewer knows whether to render as PDF, image, or Word HTML.
+//
+// Auth: workspace grant on the provider (same as sign-upload/finalize).
+// The FE BFF proxies the byte stream through same-origin so signed GCS
+// URLs never reach the browser directly — mirrors the case-scoped source
+// pattern used by /v1/cases/:caseId/documents/:docId.
+cockpitProviderRoutes.get(
+  "/v1/cockpit/providers/:providerId/documents/:docId/source",
+  async (c) => {
+    const workspaceId = c.var.tenancy.workspaceId;
+    const providerId = c.req.param("providerId");
+    const docId = c.req.param("docId");
+
+    const granted = await ensureGrantedProvider(workspaceId, providerId);
+    if (!granted) return notFoundResponse(c);
+
+    // rls: bypass — documents are provider-scoped, workspace-gated above.
+    const [doc] = await db()
+      .select({
+        id: schema.documents.id,
+        fileUri: schema.documents.fileUri,
+        mimeType: schema.documents.mimeType,
+        pageCount: schema.documents.pageCount,
+      })
+      .from(schema.documents)
+      .where(and(eq(schema.documents.id, docId), eq(schema.documents.providerId, providerId)))
+      .limit(1);
+    if (!doc || !doc.fileUri) return notFoundResponse(c);
+
+    // Short-TTL signed READ URL. The FE BFF fetches it server-side once
+    // and streams the bytes back same-origin, so it never leaks to the
+    // browser.
+    const signed = await getObjectStorage().getSignedUrl({
+      key: doc.fileUri,
+      expiresInSeconds: 60,
+    });
+
+    return c.json({
+      sourceUrl: signed.url,
+      mimeType: doc.mimeType ?? "application/pdf",
+      pageCount: doc.pageCount ?? 1,
+    });
+  },
+);
+
 // Silence "declared but never read" — `ProviderInviteInvalidError` is
 // re-exported here for the redemption endpoint to catch typed.
 export { ProviderInviteInvalidError };
