@@ -242,14 +242,7 @@ cockpitProviderRoutes.post(
         await sendEmail({
           to: row.email,
           subject: "You've been invited to Roster Healthcare",
-          text:
-            `Hi ${firstName},\n\n` +
-            "You've been invited to join the Roster Healthcare credentialing platform. " +
-            "Accept your invite here:\n\n" +
-            `${url}\n\n` +
-            "This link expires in 7 days. Once your invite is accepted we'll " +
-            "notify you by email as soon as your first credentialing case is ready.\n\n" +
-            "— The Roster Healthcare team",
+          text: `Hi ${firstName},\n\nYou've been invited to join the Roster Healthcare credentialing platform. Accept your invite here:\n\n${url}\n\nThis link expires in 7 days. Once your invite is accepted we'll notify you by email as soon as your first credentialing case is ready.\n\n— The Roster Healthcare team`,
         });
 
         await audit({
@@ -418,13 +411,7 @@ cockpitProviderRoutes.post("/v1/cockpit/providers/invites/:inviteId/resend", asy
     await sendEmail({
       to: existing.email,
       subject: "Your Roster Healthcare invite (fresh link)",
-      text:
-        `Hi ${firstName},\n\n` +
-        "Here's a fresh link to accept your Roster Healthcare invite. " +
-        "The previous link has been retired.\n\n" +
-        `${url}\n\n` +
-        "This link expires in 7 days.\n\n" +
-        "— The Roster Healthcare team",
+      text: `Hi ${firstName},\n\nHere's a fresh link to accept your Roster Healthcare invite. The previous link has been retired.\n\n${url}\n\nThis link expires in 7 days.\n\n— The Roster Healthcare team`,
     });
   } catch (err) {
     logger.error(

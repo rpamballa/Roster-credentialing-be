@@ -386,12 +386,7 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/invite-provider", async (c) =>
       await sendEmail({
         to: detail.provider.email,
         subject: "Roster Healthcare — start your credentialing packet",
-        text:
-          `Hi ${greeting},\n\n` +
-          `You've been invited to complete a credentialing case with Roster Healthcare. ` +
-          `Get started here:\n\n${url}\n\n` +
-          `This link expires in 7 days and can only be used from this device.\n\n` +
-          "— The Roster Healthcare team",
+        text: `Hi ${greeting},\n\nYou've been invited to complete a credentialing case with Roster Healthcare. Get started here:\n\n${url}\n\nThis link expires in 7 days and can only be used from this device.\n\n— The Roster Healthcare team`,
       });
       logger.info(
         { caseId: detail.caseRow.id, providerId: detail.caseRow.providerId },

@@ -194,10 +194,7 @@ export async function parseFacilityPacket(
       ? [
           {
             type: "text" as const,
-            text:
-              "Packet contents (extracted from a Word document — no page " +
-              "layout available, so bbox_citation fields will be absent):\n\n" +
-              params.packetText,
+            text: `Packet contents (extracted from a Word document — no page layout available, so bbox_citation fields will be absent):\n\n${params.packetText}`,
           },
         ]
       : []),
