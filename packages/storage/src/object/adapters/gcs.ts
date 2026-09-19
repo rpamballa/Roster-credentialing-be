@@ -137,6 +137,20 @@ export class GCSAdapter implements ObjectStorage {
   }
 
   async delete(key: string): Promise<void> {
+    // Same fake-gcs ↔ SDK auth gap as exists(): the SDK's
+    // `.file(key).delete()` gets 401 from the emulator and throws.
+    // Raw HTTP DELETE to the internal URL works and mirrors what the
+    // adapter did before for exists(). 404 is treated as success —
+    // the intent (object gone) is satisfied either way.
+    if (this.emulatorInternalUrl) {
+      const host = this.emulatorInternalUrl.replace(/\/+$/, "");
+      const url = `${host}/storage/v1/b/${this.bucketName}/o/${encodeURIComponent(key)}`;
+      const res = await fetch(url, { method: "DELETE" });
+      if (res.status !== 200 && res.status !== 204 && res.status !== 404) {
+        throw new Error(`emulator DELETE ${key} failed: ${res.status}`);
+      }
+      return;
+    }
     await this.storage.bucket(this.bucketName).file(key).delete({ ignoreNotFound: true });
   }
 
