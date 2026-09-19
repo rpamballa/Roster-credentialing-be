@@ -141,9 +141,12 @@ cockpitFacilityRoutes.post(
     // so this insert is intentionally not under the workspace RLS predicate.
     let facilityId = body.facilityId ?? null;
     if (!facilityId) {
+      // Zod refinement on SignIngestBody guarantees one of facilityId
+      // or facilityName is present, and we're in the else branch here.
+      const facilityName = body.facilityName ?? "";
       const [created] = await db()
         .insert(schema.facilities)
-        .values({ name: body.facilityName! })
+        .values({ name: facilityName })
         .returning({ id: schema.facilities.id });
       if (!created) {
         return c.json(

@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import {
-  classifyDocument,
-  extractByType,
   type DocumentContent,
   type SupportedMediaType,
+  classifyDocument,
+  extractByType,
 } from "@cred/ai";
 import { db, schema } from "@cred/db";
 import { audit } from "@cred/observability";

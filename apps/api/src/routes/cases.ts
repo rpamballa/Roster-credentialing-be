@@ -189,12 +189,6 @@ function projectDocumentSummary(d: DocumentRowLike): FeDocumentSummary | null {
   return base;
 }
 
-// ─── error helpers ────────────────────────────────────────────────────────
-
-function notFound(c: Parameters<typeof caseRoutes.post>[0] extends string ? never : never) {
-  return c;
-}
-
 // ─── 6.4  POST /v1/cases/:caseId/documents/sign-upload ───────────────────
 // Insert the documents row up-front with the FE-supplied type, sign a PUT
 // URL keyed `uploads/<caseId>/<documentId>`, return SignedUploadTarget.
@@ -974,7 +968,7 @@ interface FeCaseState {
 caseRoutes.get("/v1/cases/:caseId", async (c) => {
   const guard = assertSessionOwnsCase(c);
   if (guard) return guard;
-  const auth = c.var.providerAuth;
+  const _auth = c.var.providerAuth;
   const tenancy = c.var.tenancy;
   const caseId = c.req.param("caseId");
 

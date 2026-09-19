@@ -41,9 +41,5 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Typecheck
         run: pnpm typecheck
-      # Biome is intentionally NOT run here — the current baseline
-      # carries ~8 pre-existing lint errors we haven't cleaned yet
-      # (pre-existing on main, unrelated to any single PR). Turning
-      # them into a required gate would immediately red every PR
-      # against unrelated files. Follow-up: fix the baseline, then
-      # add `pnpm exec biome check` as a second step here.
+      - name: Biome (lint + format check)
+        run: pnpm exec biome check
