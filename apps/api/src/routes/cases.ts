@@ -268,6 +268,10 @@ caseRoutes.post(
     return c.json({
       documentId,
       uploadUrl: presign.url,
+      // Method is PUT for real GCS (v4-signed XML URL), POST for the
+      // fake-gcs-server emulator's upload endpoint. Clients must honor
+      // this — hardcoding PUT breaks the emulator path.
+      method: presign.method,
       headers: presign.headers,
       maxBytes: 25 * 1024 * 1024,
     });
