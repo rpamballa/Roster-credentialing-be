@@ -7,7 +7,9 @@ import { getObjectStorage } from "@cred/storage";
 import type { DocumentType } from "@cred/types/domain";
 import { zValidator } from "@hono/zod-validator";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import heicConvert from "heic-convert";
 import { type Context, Hono } from "hono";
+import sharp from "sharp";
 import { z } from "zod";
 import { fromFeDocumentType } from "../graphql/mappings.js";
 import { requireWriterOnMutations } from "../middleware/rbac.js";
@@ -592,6 +594,216 @@ cockpitProviderRoutes.get(
     });
   },
 );
+
+// ─── GET /v1/cockpit/documents/:docId/bytes ──────────────────────────────
+// Stream a document's raw bytes back to the FE, transcoded to a browser-
+// safe format when necessary. This is what the FE source proxies (both
+// provider- and case-scoped) fetch from — they no longer touch the signed
+// GCS URL directly, so the transcoding happens uniformly regardless of
+// which surface (provider profile, case detail) opens the doc.
+//
+// Why transcode server-side: iPhone camera uploads default to HEIC/HEIF,
+// which Chrome and Firefox have no native <img> decoder for. Instead of
+// shipping a WASM decoder to every browser (fragile across HEIC variants;
+// heic2any silently fails on HEIF-with-HEVC subtypes we saw in the beta),
+// we decode once here with sharp (libvips + libheif) and stream JPEG. TIFF
+// and BMP get the same treatment. JPEG/PNG/WebP/GIF/AVIF pass through
+// unchanged (browsers render them natively). PDF passes through too.
+//
+// Auth: docId-only, but we resolve the doc's providerId and verify the
+// workspace has a grant on it. Both the provider profile viewer and the
+// case detail viewer need this; scoping by provider is stricter than by
+// case (a workspace with only case-level access to a shared doc wouldn't
+// be a real scenario in this data model — cases are provider-scoped).
+cockpitProviderRoutes.get("/v1/cockpit/documents/:docId/bytes", async (c) => {
+  const workspaceId = c.var.tenancy.workspaceId;
+  const docId = c.req.param("docId");
+
+  // rls: bypass — the workspace grant check below is the access control.
+  const [doc] = await db()
+    .select({
+      id: schema.documents.id,
+      providerId: schema.documents.providerId,
+      fileUri: schema.documents.fileUri,
+      mimeType: schema.documents.mimeType,
+    })
+    .from(schema.documents)
+    .where(eq(schema.documents.id, docId))
+    .limit(1);
+  if (!doc || !doc.fileUri) return notFoundResponse(c);
+
+  const granted = await ensureGrantedProvider(workspaceId, doc.providerId);
+  if (!granted) return notFoundResponse(c);
+
+  // Fetch the raw bytes via a short-lived signed READ URL. Same path the
+  // signed-URL flow used, but we consume it here and stream the result.
+  const signed = await getObjectStorage().getSignedUrl({
+    key: doc.fileUri,
+    expiresInSeconds: 30,
+  });
+  const upstream = await fetch(signed.url);
+  if (!upstream.ok || !upstream.body) {
+    logger.error({ docId, status: upstream.status }, "document_bytes_storage_fetch_failed");
+    return c.json({ title: "Storage fetch failed", status: upstream.status }, 502);
+  }
+
+  const declaredMime = doc.mimeType ?? "application/octet-stream";
+  const stream = await streamDocumentBytes({
+    upstream,
+    declaredMime,
+    docId,
+  });
+  return new Response(stream.body, {
+    status: 200,
+    headers: {
+      "content-type": stream.contentType,
+      // Signed URL is 30s TTL; a browser cache of 60s keeps repeat views
+      // (page nav, zoom) snappy without holding stale bytes.
+      "cache-control": "private, max-age=60",
+    },
+  });
+});
+
+// Formats every mainstream browser can render inline in <img> without
+// intervention. AVIF is in every major browser as of 2024; keeping it
+// here means we DON'T transcode AVIF uploads (which would be lossy).
+const BROWSER_SAFE_IMAGE_MIMES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/avif",
+  "image/svg+xml",
+]);
+
+// HEIC / HEIF variants. sharp's prebuilt libvips ships without a
+// HEVC decoder plugin (patent avoidance), so these route through the
+// heic-convert path instead — that library bundles libde265 and
+// decodes HEVC natively.
+const HEIC_MIMES = new Set([
+  "image/heic",
+  "image/heif",
+  "image/heic-sequence",
+  "image/heif-sequence",
+]);
+
+// Non-safe formats sharp CAN decode with its stock prebuild: TIFF and
+// BMP. AVIF is handled as browser-safe (it's an ISO-BMFF cousin of
+// HEIF but every current browser renders AVIF inline; only HEIC is
+// the odd one out).
+const SHARP_DECODABLE_MIMES = new Set(["image/tiff", "image/tif", "image/bmp", "image/x-bmp"]);
+
+async function streamDocumentBytes(args: {
+  upstream: Response;
+  declaredMime: string;
+  docId: string;
+}): Promise<{ body: BodyInit; contentType: string }> {
+  const { upstream, declaredMime, docId } = args;
+
+  // PDFs — always stream through untouched. react-pdf handles them.
+  if (declaredMime === "application/pdf") {
+    return { body: upstream.body as ReadableStream, contentType: "application/pdf" };
+  }
+
+  // Browser-safe images — pass through.
+  if (BROWSER_SAFE_IMAGE_MIMES.has(declaredMime)) {
+    return { body: upstream.body as ReadableStream, contentType: declaredMime };
+  }
+
+  // Buffer + inspect magic bytes for anything else. Trust the stored
+  // mime as a first hint but never as the last word — providers upload
+  // renamed files all the time, and a JPEG with a `.heic` extension
+  // (or vice-versa) mustn't blow up here.
+  const inputBuf = Buffer.from(await upstream.arrayBuffer());
+  const sniffed = sniffImageMime(inputBuf) ?? declaredMime;
+
+  if (BROWSER_SAFE_IMAGE_MIMES.has(sniffed)) {
+    return { body: inputBuf, contentType: sniffed };
+  }
+
+  // HEIC/HEIF — decode via heic-convert (bundled libde265), then run
+  // through sharp for mozjpeg re-encoding at the same quality budget
+  // as everything else so file sizes stay reasonable.
+  if (HEIC_MIMES.has(sniffed)) {
+    try {
+      const rawJpeg = await heicConvert({ buffer: inputBuf, format: "JPEG", quality: 0.85 });
+      const optimized = await sharp(Buffer.from(rawJpeg))
+        .rotate()
+        .jpeg({ quality: 88, mozjpeg: true })
+        .toBuffer();
+      return { body: optimized, contentType: "image/jpeg" };
+    } catch (err) {
+      logger.warn({ err, docId, declaredMime, sniffed }, "document_bytes_heic_transcode_failed");
+      // Fall through to raw stream so the browser at least offers a
+      // download instead of a 500.
+    }
+  }
+
+  // TIFF / BMP / anything else image-shaped — try sharp. Its stock
+  // build handles these fine.
+  if (SHARP_DECODABLE_MIMES.has(sniffed) || sniffed.startsWith("image/")) {
+    try {
+      const jpegBuf = await sharp(inputBuf, { failOn: "none" })
+        .rotate() // respect EXIF orientation
+        .jpeg({ quality: 88, mozjpeg: true })
+        .toBuffer();
+      return { body: jpegBuf, contentType: "image/jpeg" };
+    } catch (err) {
+      logger.warn({ err, docId, declaredMime, sniffed }, "document_bytes_transcode_failed");
+      // Fall through to raw stream below so the browser at least offers
+      // a download instead of a 500.
+    }
+  }
+
+  // Non-image, non-PDF, or unsupported — stream original bytes with the
+  // declared mime and let the browser handle it (usually a download).
+  return { body: inputBuf, contentType: declaredMime };
+}
+
+/**
+ * Read the first ~12 bytes of a buffer to identify its actual image
+ * format. This runs on every non-safe upload, so keep it allocation-free
+ * and short-circuit as soon as a signature matches.
+ */
+function sniffImageMime(buf: Buffer): string | null {
+  if (buf.length < 12) return null;
+  // JPEG: FF D8 FF
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  // PNG: 89 50 4E 47
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return "image/png";
+  // GIF: 47 49 46
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return "image/gif";
+  // WebP: RIFF ... WEBP
+  if (
+    buf[0] === 0x52 &&
+    buf[1] === 0x49 &&
+    buf[2] === 0x46 &&
+    buf[3] === 0x46 &&
+    buf[8] === 0x57 &&
+    buf[9] === 0x45 &&
+    buf[10] === 0x42 &&
+    buf[11] === 0x50
+  )
+    return "image/webp";
+  // BMP: BM
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return "image/bmp";
+  // TIFF: II*\0 or MM\0*
+  if (
+    (buf[0] === 0x49 && buf[1] === 0x49 && buf[2] === 0x2a && buf[3] === 0x00) ||
+    (buf[0] === 0x4d && buf[1] === 0x4d && buf[2] === 0x00 && buf[3] === 0x2a)
+  )
+    return "image/tiff";
+  // ISO-BMFF (HEIC/HEIF/AVIF): bytes 4-11 are "ftyp" then a brand code.
+  // heic/heix/mif1/msf1 = HEIC. avif = AVIF. We only need to distinguish
+  // heic-shaped vs avif here; both flow to the sharp branch anyway.
+  if (buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70) {
+    const brand = buf.toString("ascii", 8, 12);
+    if (brand === "avif" || brand === "avis") return "image/avif";
+    return "image/heic";
+  }
+  return null;
+}
 
 // ─── DELETE /v1/cockpit/providers/:providerId/documents/:docId ───────────
 // Admin cleanup of a provider document (stale ingest, wrong upload, duplicate).
