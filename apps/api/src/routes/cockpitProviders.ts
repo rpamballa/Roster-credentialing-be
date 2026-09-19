@@ -6,7 +6,7 @@ import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import type { DocumentType } from "@cred/types/domain";
 import { zValidator } from "@hono/zod-validator";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { fromFeDocumentType } from "../graphql/mappings.js";
@@ -590,6 +590,101 @@ cockpitProviderRoutes.get(
       mimeType: doc.mimeType ?? "application/pdf",
       pageCount: doc.pageCount ?? 1,
     });
+  },
+);
+
+// ─── DELETE /v1/cockpit/providers/:providerId/documents/:docId ───────────
+// Admin cleanup of a provider document (stale ingest, wrong upload, duplicate).
+// Removes both the DB row AND the GCS object so we never leave orphaned
+// bytes in the bucket. Refuses if a submitted packet references this doc —
+// admin must roll back the packet first.
+//
+// Provider-side (magic-link) sessions cannot reach this route; the
+// cockpit auth middleware requires a staff writer.
+cockpitProviderRoutes.delete(
+  "/v1/cockpit/providers/:providerId/documents/:docId",
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const workspaceId = c.var.tenancy.workspaceId;
+    const providerId = c.req.param("providerId");
+    const docId = c.req.param("docId");
+
+    const granted = await ensureGrantedProvider(workspaceId, providerId);
+    if (!granted) return notFoundResponse(c);
+
+    // rls: bypass — documents are provider-scoped, workspace-gated above.
+    const [doc] = await db()
+      .select({ id: schema.documents.id, fileUri: schema.documents.fileUri })
+      .from(schema.documents)
+      .where(and(eq(schema.documents.id, docId), eq(schema.documents.providerId, providerId)))
+      .limit(1);
+    if (!doc) return notFoundResponse(c);
+
+    // Guard: submitted packets reference document ids in
+    // provenance.documentIds. If any submitted packet in the workspace
+    // includes this doc, refuse — deleting would break the compliance
+    // trail. Draft/unsubmitted packets are fine (they get rebuilt from
+    // fresh docs anyway).
+    const [pinnedByPacket] = await db()
+      .select({ id: schema.packets.id })
+      .from(schema.packets)
+      .where(
+        and(
+          eq(schema.packets.workspaceId, workspaceId),
+          sql`${schema.packets.submittedAt} IS NOT NULL`,
+          sql`${schema.packets.provenance}->'documentIds' @> ${JSON.stringify([docId])}::jsonb`,
+        ),
+      )
+      .limit(1);
+    if (pinnedByPacket) {
+      return c.json(
+        {
+          type: "https://errors.cred/documents/pinned-by-packet",
+          title: "Document is referenced by a submitted packet",
+          status: 409,
+          instance: c.var.requestId,
+          packetId: pinnedByPacket.id,
+        },
+        409,
+      );
+    }
+
+    // Best-effort delete of the GCS object. If the object isn't there
+    // (never landed), the adapter's ignoreNotFound: true swallows it.
+    // The DB row is the source of truth; if the storage call throws
+    // for a real reason we abort so we don't leave the DB pointing at
+    // a stale key.
+    if (doc.fileUri) {
+      try {
+        await getObjectStorage().delete(doc.fileUri);
+      } catch (err) {
+        logger.error({ err, docId, fileUri: doc.fileUri }, "document_delete_storage_failed");
+        return c.json(
+          {
+            type: "https://errors.cred/documents/storage-delete-failed",
+            title: "Failed to delete the underlying file",
+            status: 502,
+            instance: c.var.requestId,
+          },
+          502,
+        );
+      }
+    }
+
+    await db().delete(schema.documents).where(eq(schema.documents.id, docId));
+
+    await audit({
+      workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "document.deleted",
+      targetEntityType: "document",
+      targetEntityId: docId,
+      before: { providerId, fileUri: doc.fileUri },
+      requestId: c.var.requestId,
+    });
+
+    return new Response(null, { status: 204 });
   },
 );
 

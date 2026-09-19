@@ -4,7 +4,7 @@ import { db, schema, withTenancy } from "@cred/db";
 import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import { zValidator } from "@hono/zod-validator";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { requireWriterOnMutations } from "../middleware/rbac.js";
@@ -535,3 +535,98 @@ function notFoundResponse(c: Context<ApiBindings>): Response {
     404,
   );
 }
+
+// ─── DELETE /v1/cockpit/facility-profiles/:facilityProfileId ─────────────
+// Admin cleanup of a facility profile (bad ingest, obsolete version). Removes
+// the DB row + the source packet blob from GCS. Refuses if any non-terminal
+// case is pinned to this profile — admin must first close or reassign those
+// cases. Cases in `submitted`, `completed`, or `withdrawn` status are treated
+// as done and do not block deletion (their packet snapshot preserves the
+// requirements they were submitted against).
+cockpitFacilityRoutes.delete(
+  "/v1/cockpit/facility-profiles/:facilityProfileId",
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const workspaceId = c.var.tenancy.workspaceId;
+    const facilityProfileId = c.req.param("facilityProfileId");
+
+    // Lookup within tenancy — enforces workspace ownership of the profile.
+    const [profile] = await withTenancy(c.var.tenancy, (tx) =>
+      tx
+        .select({
+          id: schema.facilityProfiles.id,
+          sourcePacketUri: schema.facilityProfiles.sourcePacketUri,
+        })
+        .from(schema.facilityProfiles)
+        .where(eq(schema.facilityProfiles.id, facilityProfileId))
+        .limit(1),
+    );
+    if (!profile) return notFoundResponse(c);
+
+    // Guard: any active case pinned to this profile blocks the delete.
+    const [pinnedCase] = await db()
+      .select({ id: schema.cases.id })
+      .from(schema.cases)
+      .where(
+        and(
+          eq(schema.cases.workspaceId, workspaceId),
+          eq(schema.cases.facilityProfileId, facilityProfileId),
+          sql`${schema.cases.status} NOT IN ('submitted','completed','withdrawn')`,
+        ),
+      )
+      .limit(1);
+    if (pinnedCase) {
+      return c.json(
+        {
+          type: "https://errors.cred/facility-profiles/pinned-by-case",
+          title: "Facility profile is used by an active case",
+          status: 409,
+          instance: c.var.requestId,
+          caseId: pinnedCase.id,
+        },
+        409,
+      );
+    }
+
+    // Best-effort delete of the source packet blob. The adapter's
+    // ignoreNotFound: true swallows the "already gone" case. If storage
+    // throws for a real reason we abort so we don't leave a dangling
+    // DB row that thinks its packet still exists.
+    if (profile.sourcePacketUri) {
+      try {
+        await getObjectStorage().delete(profile.sourcePacketUri);
+      } catch (err) {
+        logger.error(
+          { err, facilityProfileId, sourcePacketUri: profile.sourcePacketUri },
+          "facility_profile_delete_storage_failed",
+        );
+        return c.json(
+          {
+            type: "https://errors.cred/facility-profiles/storage-delete-failed",
+            title: "Failed to delete the source packet blob",
+            status: 502,
+            instance: c.var.requestId,
+          },
+          502,
+        );
+      }
+    }
+
+    await db()
+      .delete(schema.facilityProfiles)
+      .where(eq(schema.facilityProfiles.id, facilityProfileId));
+
+    await audit({
+      workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "facility_profile.deleted",
+      targetEntityType: "facility_profile",
+      targetEntityId: facilityProfileId,
+      before: { sourcePacketUri: profile.sourcePacketUri },
+      requestId: c.var.requestId,
+    });
+
+    return new Response(null, { status: 204 });
+  },
+);
