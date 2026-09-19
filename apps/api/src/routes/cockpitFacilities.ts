@@ -201,6 +201,7 @@ cockpitFacilityRoutes.post(
     return c.json({
       ingestJobId: jobId,
       uploadUrl: signed.url,
+      method: signed.method,
       headers: signed.headers,
       maxBytes: MAX_INGEST_BYTES,
     });

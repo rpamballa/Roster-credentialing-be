@@ -1,6 +1,12 @@
 export interface PutSignedUrl {
   url: string;
-  method: "PUT";
+  /**
+   * Real-GCS signed URLs are always PUT (v4-signed XML API).
+   * The fake-gcs-server emulator uses POST to its
+   * `/upload/storage/v1/b/<bucket>/o?uploadType=media` endpoint;
+   * that path exists in the emulator branch of the adapter only.
+   */
+  method: "PUT" | "POST";
   headers: Record<string, string>;
   key: string;
   expiresAt: Date;

@@ -1,0 +1,74 @@
+## Local staging stack — minimum viable slice.
+#
+# Brings up just enough infrastructure to exercise the auth, upload,
+# and cockpit review flows against a real API + real Postgres +
+# a fake GCS. Deliberately does NOT include Temporal or the workers
+# container yet — those wire in later when we start testing ingest
+# workflows locally.
+#
+# Deliberately NOT the file the prod VM uses. The VM's compose lives
+# in the deploy repo (see /opt/roster on roster-prod). This file is
+# only for local dev/staging on a developer laptop so we can verify
+# flows before shipping to prod.
+#
+# Usage:
+#   1. cp .env.staging.example .env.staging
+#   2. Fill ANTHROPIC_API_KEY (any other secrets stay at defaults).
+#   3. docker compose -f docker-compose.staging.yml --env-file .env.staging up -d
+#   4. pnpm --filter @cred/db migrate
+#   5. pnpm --filter @cred/db seed
+#   6. In a new shell: pnpm --filter @cred/api dev
+#   7. In another shell: (in FE repo) API_BASE_URL=http://localhost:3001 pnpm --filter @cred/web dev
+#   8. Browse to http://localhost:3000
+
+name: cred-staging
+
+services:
+  postgres:
+    image: quay.io/tembo/pg16-pgmq:latest
+    environment:
+      POSTGRES_USER: cred
+      POSTGRES_PASSWORD: cred
+      POSTGRES_DB: cred
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cred -d cred"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # fake-gcs-server — signed-URL-compatible drop-in for the real GCS.
+  # We publish the same host+port for the internal proxy and for
+  # browser-side PUTs (localhost:4443) so signed URLs work both ways.
+  fake-gcs:
+    image: fsouza/fake-gcs-server:latest
+    command: >
+      -scheme http
+      -host 0.0.0.0
+      -port 4443
+      -public-host localhost:4443
+      -external-url http://localhost:4443
+    ports:
+      - "4443:4443"
+    volumes:
+      - gcsdata:/storage
+
+  # Redis is optional at the moment — the API only touches it when
+  # BullMQ is wired up. Kept in this compose so a future PR that
+  # exercises the queue can just up-tick.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  gcsdata:

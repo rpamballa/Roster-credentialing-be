@@ -107,6 +107,11 @@ cockpitProviderRoutes.post(
     return c.json({
       documentId,
       uploadUrl: signed.url,
+      // The adapter returns PUT for real GCS (v4-signed XML URL) and
+      // POST for the fake-gcs-server emulator's upload endpoint.
+      // Clients must use the method the adapter picked — hardcoding
+      // PUT breaks the emulator path.
+      method: signed.method,
       headers: signed.headers,
       maxBytes: MAX_DOC_BYTES,
     });

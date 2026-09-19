@@ -19,7 +19,14 @@ const DEFAULT_TTL = 15 * 60;
 export class GCSAdapter implements ObjectStorage {
   private readonly storage: Storage;
   private readonly bucketName: string;
+  /** Emulator URL the browser dials (usually `http://localhost:4443`). */
   private readonly emulatorPublicUrl: string | undefined;
+  /**
+   * Emulator URL the API container dials (usually `http://gcs-emulator:4443`
+   * on the internal docker network). When the API and the emulator are on
+   * the same machine outside docker, this equals `emulatorPublicUrl`.
+   */
+  private readonly emulatorInternalUrl: string | undefined;
 
   constructor() {
     const cfg = env();
@@ -35,8 +42,9 @@ export class GCSAdapter implements ObjectStorage {
       ...(emulator ? { apiEndpoint: emulator } : {}),
     });
     this.bucketName = cfg.GCS_BUCKET;
-    // Emulator URLs the browser will hit — same host as apiEndpoint by
-    // default; caller can override for docker → host networking.
+    // Two emulator URLs — one for browsers (baked into signed URLs) and
+    // one for server-side calls the API makes to verify uploads.
+    this.emulatorInternalUrl = emulator;
     this.emulatorPublicUrl = cfg.STORAGE_EMULATOR_PUBLIC_URL ?? emulator;
   }
 
@@ -50,11 +58,18 @@ export class GCSAdapter implements ObjectStorage {
     const file = this.storage.bucket(this.bucketName).file(params.key);
 
     if (this.emulatorPublicUrl) {
-      // fake-gcs-server accepts any URL that matches its bucket/object
-      // layout; skip real v4 signing.
+      // fake-gcs-server does NOT accept a raw PUT against the object
+      // resource path (`/storage/v1/b/<bucket>/o/<key>`) — that path
+      // is the JSON-API "update object metadata" endpoint and returns
+      // "invalid uploadType" / "metadata couldn't decode" on binary
+      // bodies. The direct-upload endpoint is a POST to
+      //   /upload/storage/v1/b/<bucket>/o?uploadType=media&name=<key>
+      // with the raw bytes as the body. Real prod GCS uses a v4-signed
+      // XML-style PUT and works fine — this branch only fires when
+      // STORAGE_EMULATOR_HOST is set.
       return {
-        url: this.directEmulatorUrl(params.key),
-        method: "PUT",
+        url: this.emulatorUploadUrl(params.key),
+        method: "POST",
         headers: { "content-type": params.contentType },
         key: params.key,
         expiresAt,
@@ -93,6 +108,22 @@ export class GCSAdapter implements ObjectStorage {
   }
 
   async exists(key: string): Promise<boolean> {
+    // In prod the SDK's exists() is authoritative — it authenticates
+    // via ADC and hits real GCS. In emulator mode the SDK's
+    // `.file(key).exists()` returns false even when the object is
+    // there (a well-known fake-gcs-server ↔ SDK auth compatibility
+    // gap: the SDK's metadata request needs credentials the emulator
+    // doesn't handle, so it silently treats the 401 as "not found").
+    // Bypass with a raw HEAD to the internal emulator URL (the API
+    // container uses the docker-network hostname, not the browser-
+    // facing one). That's how upload-finalize verifies the bytes
+    // actually landed before flipping the document to `uploaded`.
+    if (this.emulatorInternalUrl) {
+      const host = this.emulatorInternalUrl.replace(/\/+$/, "");
+      const url = `${host}/storage/v1/b/${this.bucketName}/o/${encodeURIComponent(key)}`;
+      const res = await fetch(url, { method: "HEAD" });
+      return res.status === 200;
+    }
     const [exists] = await this.storage.bucket(this.bucketName).file(key).exists();
     return exists;
   }
@@ -101,8 +132,20 @@ export class GCSAdapter implements ObjectStorage {
     await this.storage.bucket(this.bucketName).file(key).delete({ ignoreNotFound: true });
   }
 
+  /** GET metadata / download URL — used by `getSignedUrl` (readback). */
   private directEmulatorUrl(key: string): string {
     const host = this.emulatorPublicUrl?.replace(/\/+$/, "");
     return `${host}/storage/v1/b/${this.bucketName}/o/${encodeURIComponent(key)}`;
+  }
+
+  /**
+   * Direct-upload endpoint for `fake-gcs-server`. Distinct from the object
+   * resource path above — this one accepts the raw bytes as the request
+   * body via `uploadType=media`. See the comment in `putSignedUrl` for
+   * why this exists.
+   */
+  private emulatorUploadUrl(key: string): string {
+    const host = this.emulatorPublicUrl?.replace(/\/+$/, "");
+    return `${host}/upload/storage/v1/b/${this.bucketName}/o?uploadType=media&name=${encodeURIComponent(key)}`;
   }
 }
