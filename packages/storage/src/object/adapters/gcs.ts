@@ -97,8 +97,16 @@ export class GCSAdapter implements ObjectStorage {
   }): Promise<GetSignedUrl> {
     const expiresIn = params.expiresInSeconds ?? DEFAULT_TTL;
     const expiresAt = new Date(Date.now() + expiresIn * 1000);
-    if (this.emulatorPublicUrl) {
-      return { url: this.directEmulatorUrl(params.key), expiresAt };
+    if (this.emulatorInternalUrl) {
+      // Read URLs are consumed server-side by the FE BFF proxy that
+      // streams bytes to the browser same-origin. That server-side
+      // fetch happens inside the docker network, so it needs the
+      // internal hostname (`gcs-emulator:4443`), not the browser-
+      // facing `localhost:4443` — otherwise it 500s with ECONNREFUSED
+      // trying to reach its own container's port.
+      const host = this.emulatorInternalUrl.replace(/\/+$/, "");
+      const url = `${host}/storage/v1/b/${this.bucketName}/o/${encodeURIComponent(params.key)}?alt=media`;
+      return { url, expiresAt };
     }
     const [url] = await this.storage
       .bucket(this.bucketName)
