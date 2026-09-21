@@ -236,19 +236,16 @@ caseRoutes.post(
 
     const beDocumentType = FE_TO_BE_DOC_TYPE[body.documentType];
 
-    await withTenancy(tenancy, async (tx) => {
-      await tx.insert(schema.documents).values({
-        id: documentId,
-        providerId: auth.session.providerId,
-        documentType: beDocumentType,
-        fileUri,
-        originalFilename: body.originalFilename ?? null,
-        mimeType: body.mimeType,
-        source: "provider_upload",
-        extractionStatus: "pending",
-      });
-    });
-
+    // Deliberately no DB insert here. Previously we inserted the row
+    // eagerly so the FE had something to reference, but every failed
+    // PUT (dropped connection, closed tab, CF Workers 400) left an
+    // orphan row pointing at a nonexistent GCS object. The row is now
+    // created in the /uploaded finalize handler AFTER we've verified
+    // the bytes actually landed.
+    //
+    // The audit event still fires — it records intent, and the
+    // finalize handler carries documentType through in-body so the
+    // insert has everything it needs.
     await audit({
       workspaceId: tenancy.workspaceId,
       actorUserId: null,
@@ -261,6 +258,9 @@ caseRoutes.post(
         caseId,
         documentType: beDocumentType,
         source: "provider_upload",
+        fileUri,
+        mimeType: body.mimeType,
+        originalFilename: body.originalFilename ?? null,
       },
       requestId: c.var.requestId,
     });
@@ -279,13 +279,41 @@ caseRoutes.post(
 );
 
 // ─── 6.5  POST /v1/cases/:caseId/documents/:docId/uploaded ───────────────
-// Verify the object exists, flip to running, kick inline extraction, return
-// a DocumentSummary with extractionStatus="processing".
+// Two-mode finalize:
+//   (new, post-refactor)  no DB row exists yet — verify the object
+//                         landed in GCS, then INSERT the row using the
+//                         documentType the FE re-passes in the body.
+//   (legacy, pre-rollout) a DB row already exists (old sign-upload
+//                         inserted it). Behave as before: verify GCS,
+//                         update lightweight metadata, kick extraction.
+//
+// The dual-mode window closes as soon as every deployed FE is on the
+// new /uploaded body schema; at that point the "row exists" branch
+// stops firing except for the ~10-min FE-cache overlap.
 const UploadedSchema = z
   .object({
+    documentType: z
+      .enum([
+        "medical_license",
+        "dea",
+        "board_certification",
+        "bls",
+        "acls",
+        "medical_diploma",
+        "government_id",
+        "vaccination",
+        "malpractice_insurance",
+      ])
+      .optional(),
     pageCount: z.number().int().positive().max(2000).optional(),
     originalFilename: z.string().max(255).optional(),
     mimeType: z.string().min(1).max(128).optional(),
+    sizeBytes: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(64 * 1024 * 1024)
+      .optional(),
   })
   .optional();
 
@@ -300,6 +328,7 @@ caseRoutes.post(
     if (guard) return guard;
     const auth = c.var.providerAuth;
     const tenancy = c.var.tenancy;
+    const caseId = c.req.param("caseId");
     const docId = c.req.param("docId");
     const body = c.req.valid("json");
 
@@ -316,13 +345,114 @@ caseRoutes.post(
         .limit(1);
       return row ?? null;
     });
+
+    // New flow — no pre-existing row. Verify GCS, then insert here.
     if (!found) {
-      return c.json(
-        { type: "about:blank", title: "Not Found", status: 404, instance: c.var.requestId },
-        404,
-      );
+      if (!body.documentType) {
+        // No row + no documentType hint = nothing we can safely insert.
+        // This only fires when a client hits /uploaded without going
+        // through the new sign-upload flow, or with a stale FE bundle
+        // that hasn't picked up the metadata passthrough yet.
+        return c.json(
+          {
+            type: "https://errors.cred/upload/missing-type",
+            title: "documentType required to finalize a fresh upload",
+            status: 400,
+            instance: c.var.requestId,
+          },
+          400,
+        );
+      }
+      const fileUri = `uploads/${caseId}/${docId}`;
+      const exists = await getObjectStorage().exists(fileUri);
+      if (!exists) {
+        return c.json(
+          {
+            type: "https://errors.cred/upload/missing",
+            title: "Upload not found in object storage",
+            status: 409,
+            instance: c.var.requestId,
+          },
+          409,
+        );
+      }
+      const beDocumentType = FE_TO_BE_DOC_TYPE[body.documentType];
+      const [inserted] = await withTenancy(tenancy, async (tx) => {
+        return tx
+          .insert(schema.documents)
+          .values({
+            id: docId,
+            providerId: auth.session.providerId,
+            documentType: beDocumentType,
+            fileUri,
+            originalFilename: body.originalFilename ?? null,
+            mimeType: body.mimeType ?? "application/octet-stream",
+            pageCount: body.pageCount ?? null,
+            source: "provider_upload",
+            extractionStatus: "pending",
+          })
+          .onConflictDoNothing({ target: schema.documents.id })
+          .returning();
+      });
+      // onConflictDoNothing returns [] on retry — treat as success and
+      // fall through to a projection lookup.
+      const [row] = inserted
+        ? [inserted]
+        : await withTenancy(tenancy, async (tx) => {
+            return tx
+              .select()
+              .from(schema.documents)
+              .where(eq(schema.documents.id, docId))
+              .limit(1);
+          });
+      if (!row) {
+        return c.json(
+          { type: "about:blank", title: "Not Found", status: 404, instance: c.var.requestId },
+          404,
+        );
+      }
+
+      await audit({
+        workspaceId: tenancy.workspaceId,
+        actorUserId: null,
+        actorType: "agent",
+        action: "document.uploaded",
+        targetEntityType: "document",
+        targetEntityId: docId,
+        after: {
+          providerId: auth.session.providerId,
+          caseId,
+          documentType: row.documentType,
+          source: "provider_upload",
+        },
+        requestId: c.var.requestId,
+      });
+
+      void advanceDocumentExtractionInline({
+        documentId: docId,
+        workspaceId: tenancy.workspaceId,
+        documentTypeHint: row.documentType,
+      });
+
+      const summary = projectDocumentSummary(row);
+      const responseSummary = summary
+        ? { ...summary, extractionStatus: "processing" as const }
+        : {
+            id: row.id,
+            type: "other" as unknown as FeDocumentType,
+            thumbnailUrl: null,
+            pageCount: row.pageCount ?? 1,
+            uploadedAt: row.uploadedAt.toISOString(),
+            expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
+            extractionStatus: "processing" as const,
+            reusedFromPriorCase: false,
+          };
+      return c.json(responseSummary);
     }
 
+    // Legacy path — row already exists (pre-refactor sign-upload
+    // inserted it). Keep the old behavior so in-flight uploads at the
+    // BE rollout boundary still finalize cleanly.
     const exists = await getObjectStorage().exists(found.fileUri);
     if (!exists) {
       return c.json(

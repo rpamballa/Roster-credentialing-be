@@ -82,19 +82,10 @@ cockpitProviderRoutes.post(
     });
 
     const docType: DocumentType = fromFeDocumentType(body.documentType);
-    // rls: bypass — documents are global to a provider, not workspace-scoped.
-    // The workspace gate above ensures the actor can act on this provider.
-    await db().insert(schema.documents).values({
-      id: documentId,
-      providerId,
-      documentType: docType,
-      fileUri: key,
-      mimeType: body.mimeType,
-      source: "specialist_upload",
-      extractionStatus: "pending",
-      uploadedBy: auth.session.userId,
-    });
-
+    // Deliberately no DB insert here — see cases.ts sign-upload for the
+    // full rationale. Row lands in /uploaded after we've verified the
+    // bytes are in GCS, so a failed PUT no longer leaves a dangling
+    // documents row. The audit event carries the metadata forward.
     await audit({
       workspaceId: c.var.tenancy.workspaceId,
       actorUserId: auth.session.userId,
@@ -102,7 +93,13 @@ cockpitProviderRoutes.post(
       action: "document.upload_signed",
       targetEntityType: "document",
       targetEntityId: documentId,
-      after: { providerId, documentType: docType, sizeBytes: body.sizeBytes },
+      after: {
+        providerId,
+        documentType: docType,
+        sizeBytes: body.sizeBytes,
+        fileUri: key,
+        mimeType: body.mimeType,
+      },
       requestId: c.var.requestId,
     });
 
@@ -120,12 +117,27 @@ cockpitProviderRoutes.post(
   },
 );
 
+const CockpitUploadedBody = z
+  .object({
+    documentType: z.enum(FE_DOCUMENT_TYPES).optional(),
+    mimeType: z.string().min(1).max(128).optional(),
+    originalFilename: z.string().max(255).optional(),
+    sizeBytes: z.number().int().nonnegative().max(MAX_DOC_BYTES).optional(),
+    pageCount: z.number().int().positive().max(2000).optional(),
+  })
+  .optional();
+
 cockpitProviderRoutes.post(
   "/v1/cockpit/providers/:providerId/documents/:docId/uploaded",
+  zValidator(
+    "json",
+    CockpitUploadedBody.transform((v) => v ?? {}),
+  ),
   async (c) => {
     const auth = c.var.staffAuth;
     const providerId = c.req.param("providerId");
     const docId = c.req.param("docId");
+    const body = c.req.valid("json");
 
     const granted = await ensureGrantedProvider(c.var.tenancy.workspaceId, providerId);
     if (!granted) return notFoundResponse(c);
@@ -136,8 +148,66 @@ cockpitProviderRoutes.post(
       .from(schema.documents)
       .where(and(eq(schema.documents.id, docId), eq(schema.documents.providerId, providerId)))
       .limit(1);
-    if (!doc) return notFoundResponse(c);
 
+    // New flow — no pre-existing row. Verify GCS, then insert.
+    if (!doc) {
+      if (!body.documentType) {
+        return c.json(
+          {
+            type: "https://errors.cred/upload/missing-type",
+            title: "documentType required to finalize a fresh upload",
+            status: 400,
+            instance: c.var.requestId,
+          },
+          400,
+        );
+      }
+      const fileUri = `documents/${providerId}/${docId}`;
+      const exists = await getObjectStorage().exists(fileUri);
+      if (!exists) {
+        logger.warn({ docId }, "specialist_upload_missing_object");
+        return c.json(
+          {
+            type: "https://errors.cred/upload/missing",
+            title: "Upload not found in object storage",
+            status: 409,
+            instance: c.var.requestId,
+          },
+          409,
+        );
+      }
+      const docType: DocumentType = fromFeDocumentType(body.documentType);
+      await db()
+        .insert(schema.documents)
+        .values({
+          id: docId,
+          providerId,
+          documentType: docType,
+          fileUri,
+          originalFilename: body.originalFilename ?? null,
+          mimeType: body.mimeType ?? "application/octet-stream",
+          pageCount: body.pageCount ?? null,
+          source: "specialist_upload",
+          extractionStatus: "pending",
+          uploadedBy: auth.session.userId,
+        })
+        .onConflictDoNothing({ target: schema.documents.id });
+
+      await audit({
+        workspaceId: c.var.tenancy.workspaceId,
+        actorUserId: auth.session.userId,
+        actorType: "user",
+        action: "document.uploaded",
+        targetEntityType: "document",
+        targetEntityId: docId,
+        after: { providerId, source: "specialist_upload", documentType: docType },
+        requestId: c.var.requestId,
+      });
+
+      return new Response(null, { status: 204 });
+    }
+
+    // Legacy path — pre-refactor sign-upload inserted the row already.
     const exists = await getObjectStorage().exists(doc.fileUri);
     if (!exists) {
       logger.warn({ docId }, "specialist_upload_missing_object");
