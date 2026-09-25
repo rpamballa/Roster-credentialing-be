@@ -6,3 +6,4 @@ export * from "./provider-invite.js";
 export * from "./sms.js";
 export * from "./reference-access.js";
 export * from "./docusign.js";
+export * from "./password.js";

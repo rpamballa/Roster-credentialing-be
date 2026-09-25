@@ -37,6 +37,10 @@ export function buildApp(): Hono<ApiBindings> {
 
   // Anonymous, abuse-prone endpoints are rate-limited per IP.
   app.use("/auth/magic-link/*", rateLimit({ scope: "magic-link", windowSeconds: 60, max: 10 }));
+  // Password endpoints are the primary account-takeover surface; keep
+  // the per-IP window tight. 10 attempts / minute is enough for a human
+  // fat-fingering their password but not enough for online brute-force.
+  app.use("/auth/password/*", rateLimit({ scope: "password", windowSeconds: 60, max: 10 }));
   app.use("/reference/*", rateLimit({ scope: "reference", windowSeconds: 60, max: 30 }));
   app.use("/webhooks/*", rateLimit({ scope: "webhooks", windowSeconds: 60, max: 120 }));
   // Public marketing form intake. Per-IP cap is intentionally tight — a real

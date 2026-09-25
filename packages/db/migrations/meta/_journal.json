@@ -78,6 +78,13 @@
       "when": 1758153600000,
       "tag": "0010_facility_reviewed_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1758758400000,
+      "tag": "0011_password_auth",
+      "breakpoints": true
     }
   ]
 }
