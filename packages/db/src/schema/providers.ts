@@ -18,6 +18,11 @@ export const providers = pgTable(
     phone: text("phone"),
     specialties: text("specialties").array().notNull().default([]),
     statesLicensed: text("states_licensed").array().notNull().default([]),
+    // Optional link to a users row. When set, this provider signs in via
+    // the shared /auth/password/login endpoint using their user account
+    // rather than per-case magic-link tokens. Populated on invite redeem
+    // once /auth/password/set is invoked. Unique in the migration.
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }),
