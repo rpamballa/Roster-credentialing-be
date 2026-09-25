@@ -92,6 +92,13 @@
       "when": 1758758500000,
       "tag": "0012_providers_user_link",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1758758600000,
+      "tag": "0013_password_reset_tokens",
+      "breakpoints": true
     }
   ]
 }

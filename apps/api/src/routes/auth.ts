@@ -1,8 +1,10 @@
 import {
   MagicLinkInvalidError,
+  PasswordResetInvalidError,
   ProviderInviteInvalidError,
   attachProviderToInvite,
   consumeMagicLink,
+  consumePasswordReset,
   createSession,
   destroySession,
   hashPassword,
@@ -11,6 +13,7 @@ import {
   passwordSchema,
   previewProviderInviteToken,
   redeemProviderInviteToken,
+  requestPasswordReset,
   updateSession,
   verifyPassword,
 } from "@cred/auth";
@@ -436,3 +439,103 @@ function splitFullName(full: string | null): { firstName: string; lastName: stri
   const last = parts.slice(1).join(" ");
   return { firstName: first, lastName: last };
 }
+
+// ─── POST /auth/password/reset/request ──────────────────────────────
+// Kicks off the reset flow. Always 200 so we never leak which emails
+// map to accounts (account-enumeration defense). The helper is silent
+// on unknown emails; only real accounts receive a token + email.
+//
+// Rate-limited under /auth/password/* (10/min/IP). At the outer layer
+// that's enough — a per-email attacker still only gets 10 attempts a
+// minute across all victims from one IP.
+const PasswordResetRequestBody = z.object({
+  email: z.string().trim().toLowerCase().email().max(255),
+});
+
+authRoutes.post(
+  "/auth/password/reset/request",
+  zValidator("json", PasswordResetRequestBody),
+  async (c) => {
+    const { email } = c.req.valid("json");
+    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+    await requestPasswordReset({ email, requestIp: ip });
+    return c.json({ ok: true });
+  },
+);
+
+// ─── POST /auth/password/reset/confirm ──────────────────────────────
+// Consume a reset token + set a new password. On success mint a
+// session so the user is signed in immediately (they're already on
+// the reset page — bouncing to /signin would add a needless hop).
+const PasswordResetConfirmBody = z.object({
+  token: z.string().min(16).max(512),
+  password: passwordSchema,
+});
+
+authRoutes.post(
+  "/auth/password/reset/confirm",
+  zValidator("json", PasswordResetConfirmBody),
+  async (c) => {
+    const { token, password } = c.req.valid("json");
+
+    let consumed: Awaited<ReturnType<typeof consumePasswordReset>>;
+    try {
+      consumed = await consumePasswordReset(token);
+    } catch (err) {
+      if (err instanceof PasswordResetInvalidError) {
+        return c.json(
+          {
+            type: "https://errors.cred/auth/invalid-reset-token",
+            title: "This reset link is invalid, expired, or already used",
+            status: 400,
+            instance: c.var.requestId,
+          },
+          400,
+        );
+      }
+      throw err;
+    }
+
+    const hashed = await hashPassword(password);
+
+    // rls: bypass — users is workspace-independent; pre-session write.
+    await db()
+      .update(schema.users)
+      .set({ passwordHash: hashed })
+      .where(eq(schema.users.id, consumed.userId));
+
+    // Same session-shape as /auth/password/login, so the reset lands
+    // the user inside the cockpit at their default workspace.
+    const membership = await db()
+      .select({ workspaceId: schema.memberships.workspaceId })
+      .from(schema.memberships)
+      .where(eq(schema.memberships.userId, consumed.userId))
+      .limit(1);
+
+    const sid = await createSession({
+      userId: consumed.userId,
+      email: consumed.email,
+      activeWorkspaceId: membership[0]?.workspaceId ?? null,
+    });
+
+    setCookie(c, SESSION_COOKIE, sid, {
+      httpOnly: true,
+      secure: env().NODE_ENV === "production",
+      sameSite: "Lax",
+      path: "/",
+      maxAge: 30 * 24 * 60 * 60,
+    });
+
+    await audit({
+      workspaceId: membership[0]?.workspaceId ?? null,
+      actorUserId: consumed.userId,
+      actorType: "user",
+      action: "auth.password_reset_completed",
+      targetEntityType: "user",
+      targetEntityId: consumed.userId,
+      requestId: c.var.requestId,
+    });
+
+    return c.json({ ok: true });
+  },
+);

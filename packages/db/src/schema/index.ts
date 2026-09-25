@@ -3,6 +3,7 @@ export * from "./workspaces.js";
 export * from "./users.js";
 export * from "./memberships.js";
 export * from "./magicLinkTokens.js";
+export * from "./passwordResetTokens.js";
 export * from "./audit.js";
 export * from "./providers.js";
 export * from "./documents.js";
