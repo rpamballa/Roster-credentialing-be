@@ -1,9 +1,16 @@
 import {
   MagicLinkInvalidError,
+  ProviderInviteInvalidError,
+  attachProviderToInvite,
   consumeMagicLink,
   createSession,
   destroySession,
+  hashPassword,
+  hashProviderInviteToken,
   issueMagicLink,
+  passwordSchema,
+  previewProviderInviteToken,
+  redeemProviderInviteToken,
   updateSession,
   verifyPassword,
 } from "@cred/auth";
@@ -241,3 +248,191 @@ authRoutes.post("/auth/password/login", zValidator("json", PasswordLoginBody), a
 
   return c.json({ ok: true });
 });
+
+// ─── POST /auth/password/set ────────────────────────────────────────
+// Terminal step of the invite flow — the provider (or workspace-invitee
+// staff) lands on /invite/[token], sees a "Set your password" form, and
+// posts the token + chosen password here.
+//
+// Effects, all in a single request (idempotency where safe, atomicity
+// where it matters):
+//   1. Look the token up in provider_invite_tokens (workspace scope).
+//      A future extension can branch on case_access_tokens too.
+//   2. Hash the password with argon2id — same policy the FE enforced.
+//   3. Upsert users row keyed on lower(email). Set password_hash.
+//   4. Upsert providers row keyed on email; link user_id.
+//   5. Grant provider ↔ workspace via provider_workspace_grants.
+//   6. Consume the invite token (single-atomic UPDATE, so a
+//      double-submit collapses to one).
+//   7. Mint a staff session pointing at the granting workspace.
+//   8. Emit invite.redeemed + auth.password_set audit events.
+//
+// Rate-limited under /auth/password/* (10/min/IP). Same opaque error
+// surface as login for the "bad token" path.
+const PasswordSetBody = z.object({
+  token: z.string().min(16).max(512),
+  password: passwordSchema,
+});
+
+authRoutes.post("/auth/password/set", zValidator("json", PasswordSetBody), async (c) => {
+  const { token, password } = c.req.valid("json");
+
+  // Peek before we commit — invalid tokens surface a 400 before any
+  // side effects run, and we don't need to swallow a password hash for
+  // a token that was already consumed.
+  let preview: Awaited<ReturnType<typeof previewProviderInviteToken>>;
+  try {
+    preview = await previewProviderInviteToken(token);
+  } catch (err) {
+    if (err instanceof ProviderInviteInvalidError) {
+      return c.json(
+        {
+          type: "https://errors.cred/auth/invalid-invite",
+          title: "Invalid or expired invite",
+          status: 400,
+          instance: c.var.requestId,
+        },
+        400,
+      );
+    }
+    throw err;
+  }
+
+  const hashed = await hashPassword(password);
+  const email = preview.email;
+  const displayName = preview.fullName;
+
+  // rls: bypass — users is workspace-independent; we're pre-tenancy.
+  // Upsert by lower(email) so a re-redeem for the same user is a
+  // rotate-password rather than an insert conflict.
+  const [userRow] = await db()
+    .insert(schema.users)
+    .values({
+      email,
+      name: displayName,
+      passwordHash: hashed,
+      emailVerifiedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: schema.users.email,
+      set: { passwordHash: hashed, emailVerifiedAt: new Date() },
+    })
+    .returning({ id: schema.users.id });
+  if (!userRow) throw new Error("failed to upsert user on password set");
+
+  // Consume the token (single-atomic UPDATE). If a concurrent redeem
+  // stole it between the preview and now, bail cleanly.
+  let redeemed: Awaited<ReturnType<typeof redeemProviderInviteToken>>;
+  try {
+    redeemed = await redeemProviderInviteToken(token);
+  } catch (err) {
+    if (err instanceof ProviderInviteInvalidError) {
+      return c.json(
+        {
+          type: "https://errors.cred/auth/invalid-invite",
+          title: "Invalid or expired invite",
+          status: 400,
+          instance: c.var.requestId,
+        },
+        400,
+      );
+    }
+    throw err;
+  }
+
+  const { firstName, lastName } = splitFullName(redeemed.fullName);
+
+  // rls: bypass — providers is workspace-independent (§4.1). Upsert on
+  // email so a provider spanning multiple agencies stays one row.
+  let providerId: string;
+  const [existingProvider] = await db()
+    .select({ id: schema.providers.id, userId: schema.providers.userId })
+    .from(schema.providers)
+    .where(eq(schema.providers.email, redeemed.email))
+    .limit(1);
+  if (existingProvider) {
+    providerId = existingProvider.id;
+    if (existingProvider.userId !== userRow.id) {
+      await db()
+        .update(schema.providers)
+        .set({ userId: userRow.id, updatedAt: new Date() })
+        .where(eq(schema.providers.id, providerId));
+    }
+  } else {
+    const [inserted] = await db()
+      .insert(schema.providers)
+      .values({
+        email: redeemed.email,
+        firstName,
+        lastName,
+        userId: userRow.id,
+      })
+      .returning({ id: schema.providers.id });
+    if (!inserted) throw new Error("failed to create provider on password set");
+    providerId = inserted.id;
+  }
+
+  // rls: bypass — grants table is the workspace-access check.
+  await db()
+    .insert(schema.providerWorkspaceGrants)
+    .values({
+      providerId,
+      workspaceId: redeemed.workspaceId,
+      grantedBy: null,
+    })
+    .onConflictDoNothing();
+
+  await attachProviderToInvite(hashProviderInviteToken(token), providerId);
+
+  const sid = await createSession({
+    userId: userRow.id,
+    email,
+    activeWorkspaceId: redeemed.workspaceId,
+  });
+
+  setCookie(c, SESSION_COOKIE, sid, {
+    httpOnly: true,
+    secure: env().NODE_ENV === "production",
+    sameSite: "Lax",
+    path: "/",
+    maxAge: 30 * 24 * 60 * 60,
+  });
+
+  await audit({
+    workspaceId: redeemed.workspaceId,
+    actorUserId: userRow.id,
+    actorType: "user",
+    action: "auth.password_set",
+    targetEntityType: "user",
+    targetEntityId: userRow.id,
+    after: { providerId },
+    requestId: c.var.requestId,
+  });
+
+  await audit({
+    workspaceId: redeemed.workspaceId,
+    actorUserId: userRow.id,
+    actorType: "user",
+    action: "provider_invite.redeemed",
+    targetEntityType: "provider",
+    targetEntityId: providerId,
+    after: { email, source: "password_set" },
+    requestId: c.var.requestId,
+  });
+
+  return c.json({
+    ok: true,
+    userId: userRow.id,
+    providerId,
+    workspaceId: redeemed.workspaceId,
+  });
+});
+
+function splitFullName(full: string | null): { firstName: string; lastName: string } {
+  const trimmed = (full ?? "").trim();
+  if (!trimmed) return { firstName: "Provider", lastName: "" };
+  const parts = trimmed.split(/\s+/);
+  const first = parts[0] ?? "Provider";
+  const last = parts.slice(1).join(" ");
+  return { firstName: first, lastName: last };
+}
