@@ -5,7 +5,6 @@ export * from "./case-access.js";
 export * from "./provider-invite.js";
 export * from "./sms.js";
 export * from "./reference-access.js";
-export * from "./docusign.js";
 export * from "./password.js";
 export * from "./password-reset.js";
 export * from "./provider-account.js";

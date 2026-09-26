@@ -8,6 +8,7 @@ export * from "./audit.js";
 export * from "./providers.js";
 export * from "./documents.js";
 export * from "./cases.js";
+export * from "./caseNotes.js";
 export * from "./aiCalls.js";
 export * from "./caseAccessTokens.js";
 export * from "./providerInviteTokens.js";

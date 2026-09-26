@@ -4,7 +4,6 @@ import { rateLimit } from "./middleware/rateLimit.js";
 import { requestContext } from "./middleware/requestContext.js";
 import { sessionLoader } from "./middleware/session.js";
 import { requireTenancy } from "./middleware/tenancy.js";
-import { attestationRoutes } from "./routes/attestations.js";
 import { authRoutes } from "./routes/auth.js";
 import { caseRoutes } from "./routes/cases.js";
 import { cockpitCaseRoutes } from "./routes/cockpitCases.js";
@@ -61,7 +60,6 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", caseRoutes);
   app.route("/", referenceRoutes);
   app.route("/", webhookRoutes);
-  app.route("/", attestationRoutes);
   app.route("/", packetRoutes);
   app.route("/", metricsRoutes);
   app.route("/", marketingLeadRoutes);

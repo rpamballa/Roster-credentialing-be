@@ -68,6 +68,12 @@ export const references = pgTable(
     relationship: text("relationship"),
     email: text("email"),
     phone: text("phone"),
+    // Free-text organization the reference works at. Was previously
+    // buried in responseFields; promoted to a first-class column in
+    // migration 0016 so the cockpit review table can render it
+    // directly. New writers set both this and responseFields until
+    // the JSONB duplicate is dropped in a follow-up.
+    organization: text("organization"),
     status: text("status").notNull().default("pending"),
     responseFields: jsonb("response_fields").$type<Record<string, unknown>>(),
     respondedAt: timestamp("responded_at", { withTimezone: true }),

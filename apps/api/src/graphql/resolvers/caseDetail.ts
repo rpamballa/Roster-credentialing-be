@@ -298,13 +298,13 @@ export async function caseDetailResolver(
   }
 
   const references: ReferenceGql[] = detail.refs.map((r): ReferenceGql => {
-    // organization is captured on the reference form (POST /v1/cases/:id/references)
-    // and persisted into response_fields.organization. Older cases may
-    // not have it set — coerce to empty string so the field stays
-    // NonNull in the GraphQL contract.
+    // Prefer the first-class column (migration 0016). Fall back to
+    // the legacy responseFields.organization for rows written before
+    // the column existed; coerce anything missing to "" to keep the
+    // GraphQL contract NonNull.
     const responseFields = (r.responseFields as Record<string, unknown> | null) ?? null;
-    const rawOrganization = responseFields?.organization;
-    const organization = typeof rawOrganization === "string" ? rawOrganization : "";
+    const jsonOrg = responseFields?.organization;
+    const organization = r.organization ?? (typeof jsonOrg === "string" ? jsonOrg : "");
     return {
       id: r.id,
       fullName: r.name,
