@@ -22,4 +22,10 @@ export interface MeResponse {
     workspaceName: string;
     role: MembershipRole;
   }>;
+  /**
+   * Populated when this user represents a provider (providers.user_id
+   * points at this row). Null for staff-only users. Consumers use it
+   * to route between the cockpit (staff) and the provider portal.
+   */
+  providerId: string | null;
 }
