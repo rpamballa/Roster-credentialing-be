@@ -97,6 +97,7 @@ export interface CaseDetailGql {
   slaRisk: SlaRisk;
   stage: string;
   openedAt: string;
+  purpose: "initial_appointment" | "reappointment" | "privileging";
   targetSubmissionDate: string | null;
   submittedAt: string | null;
   provider: {
