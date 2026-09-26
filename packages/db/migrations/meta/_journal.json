@@ -120,6 +120,13 @@
       "when": 1758758900000,
       "tag": "0016_references_organization",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1758759000000,
+      "tag": "0017_case_status_events",
+      "breakpoints": true
     }
   ]
 }

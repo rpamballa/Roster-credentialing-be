@@ -9,6 +9,7 @@ import { z } from "zod";
 import { requireWriterOnMutations } from "../middleware/rbac.js";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
+import { recordCaseStatusEvent } from "../services/caseStatusEvents.js";
 import type { ApiBindings } from "../types.js";
 
 function notFoundResponse(c: Context<ApiBindings>): Response {
@@ -93,6 +94,13 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/mark-ready", async (c) => {
       .update(schema.cases)
       .set({ status: "ready_for_review" })
       .where(eq(schema.cases.id, caseId));
+    await recordCaseStatusEvent(tx, {
+      caseId,
+      workspaceId: c.var.tenancy.workspaceId,
+      fromStatus: row.status,
+      toStatus: "ready_for_review",
+      actorUserId: auth.session.userId,
+    });
     return { kind: "ok" as const, before: row.status };
   });
   if (outcome.kind === "not_found") return notFoundResponse(c);
@@ -145,6 +153,13 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/complete", async (c) => {
       .update(schema.cases)
       .set({ status: "completed", completedAt: new Date() })
       .where(eq(schema.cases.id, caseId));
+    await recordCaseStatusEvent(tx, {
+      caseId,
+      workspaceId: c.var.tenancy.workspaceId,
+      fromStatus: row.status,
+      toStatus: "completed",
+      actorUserId: auth.session.userId,
+    });
     return { kind: "ok" as const, before: row.status };
   });
   if (outcome.kind === "not_found") return notFoundResponse(c);
@@ -201,6 +216,14 @@ cockpitCaseRoutes.post(
         return { kind: "conflict" as const, current: row.status };
       }
       await tx.update(schema.cases).set({ status: "withdrawn" }).where(eq(schema.cases.id, caseId));
+      await recordCaseStatusEvent(tx, {
+        caseId,
+        workspaceId: c.var.tenancy.workspaceId,
+        fromStatus: row.status,
+        toStatus: "withdrawn",
+        actorUserId: auth.session.userId,
+        reason: body.reason,
+      });
       return { kind: "ok" as const, before: row.status };
     });
     if (outcome.kind === "not_found") return notFoundResponse(c);
@@ -702,6 +725,13 @@ cockpitCaseRoutes.post("/v1/cockpit/cases", zValidator("json", CreateCaseBody), 
       })
       .returning({ id: schema.cases.id });
     if (!row) throw new Error("case insert failed");
+    await recordCaseStatusEvent(tx, {
+      caseId: row.id,
+      workspaceId,
+      fromStatus: null,
+      toStatus: "intake",
+      actorUserId: auth.session.userId,
+    });
     return {
       kind: "ok" as const,
       caseId: row.id,

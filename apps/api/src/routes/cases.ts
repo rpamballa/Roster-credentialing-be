@@ -28,6 +28,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { requireProviderAuth } from "../middleware/session.js";
 import { requireProviderTenancy } from "../middleware/tenancy.js";
+import { recordCaseStatusEvent } from "../services/caseStatusEvents.js";
 import { advanceDocumentExtractionInline } from "../services/documentExtractionInline.js";
 import type { ApiBindings } from "../types.js";
 import { assertSessionOwnsCase } from "./_providerHelpers.js";
@@ -996,6 +997,18 @@ caseRoutes.post("/v1/cases/:caseId/ready", async (c) => {
       .set({ status: "ready_for_review" })
       .where(eq(schema.cases.id, caseId))
       .returning({ id: schema.cases.id, status: schema.cases.status });
+    await recordCaseStatusEvent(tx, {
+      caseId,
+      workspaceId: tenancy.workspaceId,
+      fromStatus: cs.status,
+      toStatus: "ready_for_review",
+      // Provider self-serve via a case-scope magic-link session —
+      // the session's providerId isn't a users.id, so we leave the
+      // actor_user_id null and rely on actorType to distinguish
+      // provider-initiated transitions from staff.
+      actorUserId: null,
+      actorType: "user",
+    });
     return { status: "ok" as const, before: cs.status, after: row?.status };
   });
 

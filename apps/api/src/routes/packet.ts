@@ -8,6 +8,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
+import { recordCaseStatusEvent } from "../services/caseStatusEvents.js";
 import { PacketAssemblyError, assemblePacket } from "../services/packetAssembly.js";
 import type { ApiBindings } from "../types.js";
 
@@ -365,6 +366,13 @@ packetRoutes.post(
     }
 
     await withTenancy(c.var.tenancy, async (tx) => {
+      // Snapshot the current status before flipping so the event log
+      // can record the transition accurately.
+      const [pre] = await tx
+        .select({ status: schema.cases.status })
+        .from(schema.cases)
+        .where(eq(schema.cases.id, caseId))
+        .limit(1);
       await tx
         .update(schema.packets)
         .set({ submittedAt: new Date(), submittedBy: auth.session.userId })
@@ -373,6 +381,13 @@ packetRoutes.post(
         .update(schema.cases)
         .set({ status: "submitted", submittedAt: new Date() })
         .where(eq(schema.cases.id, caseId));
+      await recordCaseStatusEvent(tx, {
+        caseId,
+        workspaceId: c.var.tenancy.workspaceId,
+        fromStatus: pre?.status ?? null,
+        toStatus: "submitted",
+        actorUserId: auth.session.userId,
+      });
     });
 
     await audit({
