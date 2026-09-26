@@ -1155,3 +1155,156 @@ cockpitProviderRoutes.patch(
     return c.body(null, 204);
   },
 );
+
+// ─── Provider verifications (Primary Source Verifications) ───────────────
+//
+// PSV records: manual entries for MVP (a specialist enters "verified with
+// TX Medical Board on YYYY-MM-DD, license 12345, no restrictions"). A
+// future PR can layer automated checks against NPDB / state boards /
+// ABMS on top of the same schema.
+//
+// GET  /v1/cockpit/providers/:providerId/verifications          — list all
+// POST /v1/cockpit/providers/:providerId/verifications          — add one
+// DELETE /v1/cockpit/verifications/:verificationId               — remove
+
+cockpitProviderRoutes.get("/v1/cockpit/providers/:providerId/verifications", async (c) => {
+  const providerId = c.req.param("providerId");
+  const granted = await ensureGrantedProvider(c.var.tenancy.workspaceId, providerId);
+  if (!granted) return notFoundResponse(c);
+
+  const rows = await db()
+    .select({
+      id: schema.verifications.id,
+      type: schema.verifications.type,
+      source: schema.verifications.source,
+      state: schema.verifications.state,
+      licenseNumber: schema.verifications.licenseNumber,
+      status: schema.verifications.status,
+      response: schema.verifications.response,
+      verifiedAt: schema.verifications.verifiedAt,
+      nextVerifyAt: schema.verifications.nextVerifyAt,
+      createdAt: schema.verifications.createdAt,
+    })
+    .from(schema.verifications)
+    .where(eq(schema.verifications.providerId, providerId))
+    .orderBy(desc(schema.verifications.createdAt));
+
+  return c.json({
+    verifications: rows.map((r) => ({
+      id: r.id,
+      type: r.type,
+      source: r.source,
+      state: r.state,
+      licenseNumber: r.licenseNumber,
+      status: r.status,
+      note: r.response && typeof r.response.note === "string" ? (r.response.note as string) : null,
+      verifiedAt: r.verifiedAt ? r.verifiedAt.toISOString() : null,
+      nextVerifyAt: r.nextVerifyAt ? r.nextVerifyAt.toISOString() : null,
+      createdAt: r.createdAt.toISOString(),
+    })),
+  });
+});
+
+const VerificationCreateBody = z.object({
+  type: z.string().trim().min(1).max(120),
+  source: z.string().trim().min(1).max(120),
+  state: z.string().trim().length(2).nullish(),
+  licenseNumber: z.string().trim().max(120).nullish(),
+  status: z.enum(["verified", "pending", "expired", "revoked", "error"]),
+  verifiedAt: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u, "expected YYYY-MM-DD")
+    .nullish(),
+  note: z.string().trim().max(4000).nullish(),
+});
+
+cockpitProviderRoutes.post(
+  "/v1/cockpit/providers/:providerId/verifications",
+  zValidator("json", VerificationCreateBody),
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const providerId = c.req.param("providerId");
+    const body = c.req.valid("json");
+
+    const granted = await ensureGrantedProvider(c.var.tenancy.workspaceId, providerId);
+    if (!granted) return notFoundResponse(c);
+
+    const verifiedAt = body.verifiedAt ? new Date(`${body.verifiedAt}T00:00:00Z`) : null;
+
+    // Default 90-day recheck cadence — schema comment on verifications
+    // codifies this. Only set when the record is actually verified.
+    const nextVerifyAt =
+      body.status === "verified" && verifiedAt
+        ? new Date(verifiedAt.getTime() + 90 * 24 * 60 * 60 * 1000)
+        : null;
+
+    const [row] = await db()
+      .insert(schema.verifications)
+      .values({
+        workspaceId: c.var.tenancy.workspaceId,
+        providerId,
+        type: body.type,
+        source: body.source,
+        state: body.state ?? null,
+        licenseNumber: body.licenseNumber ?? null,
+        status: body.status,
+        response: body.note ? { note: body.note } : null,
+        verifiedAt,
+        nextVerifyAt,
+      })
+      .returning({ id: schema.verifications.id, createdAt: schema.verifications.createdAt });
+
+    if (!row) throw new Error("failed to insert verification");
+
+    await audit({
+      workspaceId: c.var.tenancy.workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "verification.added",
+      targetEntityType: "verification",
+      targetEntityId: row.id,
+      after: {
+        providerId,
+        type: body.type,
+        source: body.source,
+        status: body.status,
+      },
+      requestId: c.var.requestId,
+    });
+
+    return c.json({ id: row.id, createdAt: row.createdAt.toISOString() }, 201);
+  },
+);
+
+cockpitProviderRoutes.delete("/v1/cockpit/verifications/:verificationId", async (c) => {
+  const auth = c.var.staffAuth;
+  const verificationId = c.req.param("verificationId");
+
+  // Verify the verification is in this workspace before deleting.
+  const [row] = await db()
+    .select({
+      id: schema.verifications.id,
+      workspaceId: schema.verifications.workspaceId,
+      providerId: schema.verifications.providerId,
+    })
+    .from(schema.verifications)
+    .where(eq(schema.verifications.id, verificationId))
+    .limit(1);
+  if (!row) return notFoundResponse(c);
+  if (row.workspaceId !== c.var.tenancy.workspaceId) return notFoundResponse(c);
+
+  await db().delete(schema.verifications).where(eq(schema.verifications.id, verificationId));
+
+  await audit({
+    workspaceId: c.var.tenancy.workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "verification.deleted",
+    targetEntityType: "verification",
+    targetEntityId: verificationId,
+    after: { providerId: row.providerId },
+    requestId: c.var.requestId,
+  });
+
+  return c.body(null, 204);
+});
