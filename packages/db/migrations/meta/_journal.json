@@ -99,6 +99,13 @@
       "when": 1758758600000,
       "tag": "0013_password_reset_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1758758700000,
+      "tag": "0014_backfill_provider_accounts",
+      "breakpoints": true
     }
   ]
 }

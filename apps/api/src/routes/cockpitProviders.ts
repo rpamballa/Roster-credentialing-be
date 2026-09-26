@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { ProviderInviteInvalidError, issueProviderInviteToken, sendEmail } from "@cred/auth";
+import {
+  ProviderInviteInvalidError,
+  attachProviderToInvite,
+  ensureProviderAccount,
+  hashProviderInviteToken,
+  issueProviderInviteToken,
+  sendEmail,
+} from "@cred/auth";
 import { env } from "@cred/config";
 import { db, schema } from "@cred/db";
 import { audit, logger } from "@cred/observability";
@@ -294,6 +301,21 @@ cockpitProviderRoutes.post(
           continue;
         }
 
+        // Ensure the account (users + providers + workspace grant)
+        // exists BEFORE the invite is issued. This is the "Roster
+        // Healthcare as default agency" rule: the moment an operator
+        // adds a provider to the application they get a real
+        // identity — not a floating email that only becomes an
+        // account if the invite is redeemed. It also means the
+        // provider can sign in via password reset even if the invite
+        // email is caught in spam.
+        const account = await ensureProviderAccount({
+          email: row.email,
+          fullName: row.fullName ?? null,
+          workspaceId,
+          grantedByUserId: auth.session.userId,
+        });
+
         const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
         const { token } = await issueProviderInviteToken({
           workspaceId,
@@ -302,6 +324,10 @@ cockpitProviderRoutes.post(
           invitedByUserId: auth.session.userId,
           expiresAt,
         });
+        // Attach the invite to the account we just created, so the
+        // invites list in the cockpit resolves the provider link
+        // without waiting on redemption.
+        await attachProviderToInvite(hashProviderInviteToken(token), account.providerId);
         const url = new URL(`/invite/${token}`, cfg.WEB_PUBLIC_URL).toString();
 
         // Watcher-shaped log so scripts/magic-link-watch.sh sees it too.
@@ -463,6 +489,16 @@ cockpitProviderRoutes.post("/v1/cockpit/providers/invites/:inviteId/resend", asy
       ),
     );
 
+  // Re-ensure the account on resend — cheap idempotent no-op when the
+  // provider already exists, but heals an invite whose original
+  // issuance predated the atomic-creation refactor.
+  const account = await ensureProviderAccount({
+    email: existing.email,
+    fullName: existing.fullName,
+    workspaceId,
+    grantedByUserId: auth.session.userId,
+  });
+
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
   const { token } = await issueProviderInviteToken({
     workspaceId,
@@ -471,6 +507,7 @@ cockpitProviderRoutes.post("/v1/cockpit/providers/invites/:inviteId/resend", asy
     invitedByUserId: auth.session.userId,
     expiresAt,
   });
+  await attachProviderToInvite(hashProviderInviteToken(token), account.providerId);
   const url = new URL(`/invite/${token}`, cfg.WEB_PUBLIC_URL).toString();
 
   logger.info(

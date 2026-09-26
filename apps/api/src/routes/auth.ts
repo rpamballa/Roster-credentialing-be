@@ -7,6 +7,7 @@ import {
   consumePasswordReset,
   createSession,
   destroySession,
+  ensureProviderAccount,
   hashPassword,
   hashProviderInviteToken,
   issueMagicLink,
@@ -282,10 +283,11 @@ authRoutes.post("/auth/password/set", zValidator("json", PasswordSetBody), async
 
   // Peek before we commit — invalid tokens surface a 400 before any
   // side effects run, and we don't need to swallow a password hash for
-  // a token that was already consumed.
-  let preview: Awaited<ReturnType<typeof previewProviderInviteToken>>;
+  // a token that was already consumed. The value itself is unused
+  // (the redeem below returns the same shape); the peek exists purely
+  // for the error surface.
   try {
-    preview = await previewProviderInviteToken(token);
+    await previewProviderInviteToken(token);
   } catch (err) {
     if (err instanceof ProviderInviteInvalidError) {
       return c.json(
@@ -300,28 +302,6 @@ authRoutes.post("/auth/password/set", zValidator("json", PasswordSetBody), async
     }
     throw err;
   }
-
-  const hashed = await hashPassword(password);
-  const email = preview.email;
-  const displayName = preview.fullName;
-
-  // rls: bypass — users is workspace-independent; we're pre-tenancy.
-  // Upsert by lower(email) so a re-redeem for the same user is a
-  // rotate-password rather than an insert conflict.
-  const [userRow] = await db()
-    .insert(schema.users)
-    .values({
-      email,
-      name: displayName,
-      passwordHash: hashed,
-      emailVerifiedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: schema.users.email,
-      set: { passwordHash: hashed, emailVerifiedAt: new Date() },
-    })
-    .returning({ id: schema.users.id });
-  if (!userRow) throw new Error("failed to upsert user on password set");
 
   // Consume the token (single-atomic UPDATE). If a concurrent redeem
   // stole it between the preview and now, bail cleanly.
@@ -343,52 +323,33 @@ authRoutes.post("/auth/password/set", zValidator("json", PasswordSetBody), async
     throw err;
   }
 
-  const { firstName, lastName } = splitFullName(redeemed.fullName);
+  // Ensure users + providers + workspace grant exist first (the shared
+  // funnel), THEN set the password on the resulting users row. Two
+  // reasons:
+  //   • If ensureProviderAccount created the row it did so without a
+  //     password hash; we set it on top so the account is instantly
+  //     usable.
+  //   • If it found an existing row (invite issue-time already made
+  //     one), the same UPDATE either rotates or first-sets the hash.
+  const account = await ensureProviderAccount({
+    email: redeemed.email,
+    fullName: redeemed.fullName,
+    workspaceId: redeemed.workspaceId,
+  });
 
-  // rls: bypass — providers is workspace-independent (§4.1). Upsert on
-  // email so a provider spanning multiple agencies stays one row.
-  let providerId: string;
-  const [existingProvider] = await db()
-    .select({ id: schema.providers.id, userId: schema.providers.userId })
-    .from(schema.providers)
-    .where(eq(schema.providers.email, redeemed.email))
-    .limit(1);
-  if (existingProvider) {
-    providerId = existingProvider.id;
-    if (existingProvider.userId !== userRow.id) {
-      await db()
-        .update(schema.providers)
-        .set({ userId: userRow.id, updatedAt: new Date() })
-        .where(eq(schema.providers.id, providerId));
-    }
-  } else {
-    const [inserted] = await db()
-      .insert(schema.providers)
-      .values({
-        email: redeemed.email,
-        firstName,
-        lastName,
-        userId: userRow.id,
-      })
-      .returning({ id: schema.providers.id });
-    if (!inserted) throw new Error("failed to create provider on password set");
-    providerId = inserted.id;
-  }
-
-  // rls: bypass — grants table is the workspace-access check.
+  const hashed = await hashPassword(password);
   await db()
-    .insert(schema.providerWorkspaceGrants)
-    .values({
-      providerId,
-      workspaceId: redeemed.workspaceId,
-      grantedBy: null,
-    })
-    .onConflictDoNothing();
+    .update(schema.users)
+    .set({ passwordHash: hashed, emailVerifiedAt: new Date() })
+    .where(eq(schema.users.id, account.userId));
+
+  const providerId = account.providerId;
+  const email = redeemed.email;
 
   await attachProviderToInvite(hashProviderInviteToken(token), providerId);
 
   const sid = await createSession({
-    userId: userRow.id,
+    userId: account.userId,
     email,
     activeWorkspaceId: redeemed.workspaceId,
   });
@@ -403,18 +364,18 @@ authRoutes.post("/auth/password/set", zValidator("json", PasswordSetBody), async
 
   await audit({
     workspaceId: redeemed.workspaceId,
-    actorUserId: userRow.id,
+    actorUserId: account.userId,
     actorType: "user",
     action: "auth.password_set",
     targetEntityType: "user",
-    targetEntityId: userRow.id,
+    targetEntityId: account.userId,
     after: { providerId },
     requestId: c.var.requestId,
   });
 
   await audit({
     workspaceId: redeemed.workspaceId,
-    actorUserId: userRow.id,
+    actorUserId: account.userId,
     actorType: "user",
     action: "provider_invite.redeemed",
     targetEntityType: "provider",
@@ -425,20 +386,11 @@ authRoutes.post("/auth/password/set", zValidator("json", PasswordSetBody), async
 
   return c.json({
     ok: true,
-    userId: userRow.id,
+    userId: account.userId,
     providerId,
     workspaceId: redeemed.workspaceId,
   });
 });
-
-function splitFullName(full: string | null): { firstName: string; lastName: string } {
-  const trimmed = (full ?? "").trim();
-  if (!trimmed) return { firstName: "Provider", lastName: "" };
-  const parts = trimmed.split(/\s+/);
-  const first = parts[0] ?? "Provider";
-  const last = parts.slice(1).join(" ");
-  return { firstName: first, lastName: last };
-}
 
 // ─── POST /auth/password/reset/request ──────────────────────────────
 // Kicks off the reset flow. Always 200 so we never leak which emails

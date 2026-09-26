@@ -4,6 +4,7 @@ import {
   ProviderInviteInvalidError,
   attachProviderToInvite,
   createProviderSession,
+  ensureProviderAccount,
   hashProviderInviteToken,
   previewProviderInviteToken,
   redeemCaseAccessToken,
@@ -187,44 +188,16 @@ providerRoutes.post(
     const { token } = c.req.valid("json");
     try {
       const invite = await redeemProviderInviteToken(token);
-      const { firstName, lastName } = splitFullName(invite.fullName);
 
-      // Provider lookup keyed on email (schema §4.1: providers are workspace-
-      // independent; the same email can span agencies). Insert if missing.
-      // rls: bypass — providers is a workspace-independent table; workspace
-      // scoping is enforced by provider_workspace_grants.
-      let providerId: string;
-      const [existing] = await db()
-        .select({ id: schema.providers.id })
-        .from(schema.providers)
-        .where(eq(schema.providers.email, invite.email))
-        .limit(1);
-      if (existing) {
-        providerId = existing.id;
-      } else {
-        const [inserted] = await db()
-          .insert(schema.providers)
-          .values({
-            email: invite.email,
-            firstName,
-            lastName,
-          })
-          .returning({ id: schema.providers.id });
-        if (!inserted) throw new Error("failed to create provider row");
-        providerId = inserted.id;
-      }
-
-      // rls: bypass — the grants table IS the workspace-access check.
-      // ON CONFLICT DO NOTHING makes re-redeeming an already-joined
-      // provider a no-op instead of a 500.
-      await db()
-        .insert(schema.providerWorkspaceGrants)
-        .values({
-          providerId,
-          workspaceId: invite.workspaceId,
-          grantedBy: null,
-        })
-        .onConflictDoNothing();
+      // Single funnel for account creation: users row + providers row
+      // linked via user_id + provider_workspace_grants — see
+      // packages/auth/src/provider-account.ts. Idempotent, so a
+      // re-redeem after the atomic-creation refactor is a no-op.
+      const { providerId } = await ensureProviderAccount({
+        email: invite.email,
+        fullName: invite.fullName,
+        workspaceId: invite.workspaceId,
+      });
 
       await attachProviderToInvite(hashProviderInviteToken(token), providerId);
 
@@ -261,15 +234,6 @@ providerRoutes.post(
     }
   },
 );
-
-function splitFullName(full: string | null): { firstName: string; lastName: string } {
-  const trimmed = (full ?? "").trim();
-  if (!trimmed) return { firstName: "Provider", lastName: "" };
-  const parts = trimmed.split(/\s+/);
-  const first = parts[0] ?? "Provider";
-  const last = parts.slice(1).join(" ");
-  return { firstName: first, lastName: last };
-}
 
 // All routes below need the provider session and the case's workspace
 // tenancy context.
