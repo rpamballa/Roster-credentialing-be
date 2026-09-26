@@ -139,6 +139,7 @@ export async function caseDetailResolver(
 
     let facilityName = "";
     let facilityAddress: string | null = null;
+    let facilityEin: string | null = null;
     let facilityId = "";
     let requirements: FacilityRequirements | null = null;
     if (cs.facilityProfileId) {
@@ -149,6 +150,7 @@ export async function caseDetailResolver(
           requirements: schema.facilityProfiles.requirements,
           name: schema.facilities.name,
           address: schema.facilities.address,
+          ein: schema.facilities.ein,
         })
         .from(schema.facilityProfiles)
         .innerJoin(schema.facilities, eq(schema.facilities.id, schema.facilityProfiles.facilityId))
@@ -158,6 +160,7 @@ export async function caseDetailResolver(
         facilityId = profile.facilityId;
         facilityName = profile.name;
         facilityAddress = profile.address;
+        facilityEin = profile.ein;
         requirements = profile.requirements as FacilityRequirements;
       }
     }
@@ -187,6 +190,7 @@ export async function caseDetailResolver(
       facilityId,
       facilityName,
       facilityAddress,
+      facilityEin,
       requirements,
       docs,
       refs,
@@ -342,6 +346,8 @@ export async function caseDetailResolver(
       id: detail.facilityId,
       name: detail.facilityName,
       profileId: detail.cs.facilityProfileId ?? "",
+      address: detail.facilityAddress,
+      ein: detail.facilityEin,
     },
     assignedSpecialist: detail.specialistName
       ? { id: detail.cs.assignedSpecialistId ?? "", fullName: detail.specialistName }

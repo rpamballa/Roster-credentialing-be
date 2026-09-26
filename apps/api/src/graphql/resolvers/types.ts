@@ -108,7 +108,13 @@ export interface CaseDetailGql {
     phone: string | null;
     specialty: string;
   };
-  facility: { id: string; name: string; profileId: string };
+  facility: {
+    id: string;
+    name: string;
+    profileId: string;
+    address: string | null;
+    ein: string | null;
+  };
   assignedSpecialist: { id: string; fullName: string } | null;
   requirements: RequirementRowGql[];
   references: ReferenceGql[];
