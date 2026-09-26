@@ -37,11 +37,22 @@ meRoutes.get("/me", async (c) => {
     .where(eq(schema.users.id, auth.session.userId))
     .limit(1);
 
+  // rls: bypass — providers is workspace-independent; we look this user
+  // up by user_id to expose the provider-portal path to the FE. Null
+  // for staff-only users; non-null triggers the /provider landing
+  // instead of /cockpit in the cockpit layout.
+  const providerRows = await db()
+    .select({ id: schema.providers.id })
+    .from(schema.providers)
+    .where(eq(schema.providers.userId, auth.session.userId))
+    .limit(1);
+
   const body: MeResponse = {
     userId: auth.session.userId,
     email: auth.session.email,
     name: userRows[0]?.name ?? null,
     memberships,
+    providerId: providerRows[0]?.id ?? null,
   };
   return c.json(body);
 });
