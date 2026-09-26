@@ -21,6 +21,7 @@ import { meRoutes } from "./routes/me.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { packetRoutes } from "./routes/packet.js";
 import { providerRoutes } from "./routes/provider.js";
+import { providerMeRoutes } from "./routes/providerMe.js";
 import { referenceRoutes } from "./routes/reference.js";
 import { supportRoutes } from "./routes/support.js";
 import { webhookRoutes } from "./routes/webhooks.js";
@@ -55,6 +56,7 @@ export function buildApp(): Hono<ApiBindings> {
   // cleanup.
   mountDemoAuth(app);
   app.route("/", meRoutes);
+  app.route("/", providerMeRoutes);
   app.route("/", providerRoutes);
   app.route("/", caseRoutes);
   app.route("/", referenceRoutes);
