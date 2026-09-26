@@ -18,18 +18,6 @@ function notFoundResponse(c: Context<ApiBindings>): Response {
   );
 }
 
-function conflictResponse(c: Context<ApiBindings>, code: string): Response {
-  return c.json(
-    {
-      type: `https://errors.cred/cockpit/${code}`,
-      title: code.replace(/_/g, " "),
-      status: 409,
-      instance: c.var.requestId,
-    },
-    409,
-  );
-}
-
 // Cockpit case action endpoints. All return 204 on success and audit-log
 // the mutation. The frontend BFFs in apps/web/app/api/cockpit/cases/* call
 // these directly.
@@ -75,24 +63,50 @@ cockpitCaseRoutes.post(
   },
 );
 
+// Statuses from which a cockpit user may flip a case to
+// ready_for_review. Intake / documents_pending / documents_review
+// mean the provider hasn't finished uploading / reviewing, so
+// allowing mark-ready from those would submit an incomplete packet.
+// Sending from awaiting_provider or references_pending is legitimate
+// (specialists sometimes finish paperwork on behalf of the provider).
+const MARK_READY_ALLOWED_STATUSES = new Set([
+  "awaiting_provider",
+  "references_pending",
+  "attestation_pending",
+]);
+
 cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/mark-ready", async (c) => {
   const auth = c.var.staffAuth;
   const caseId = c.req.param("caseId");
 
-  const before = await withTenancy(c.var.tenancy, async (tx) => {
+  const outcome = await withTenancy(c.var.tenancy, async (tx) => {
     const [row] = await tx
       .select({ status: schema.cases.status })
       .from(schema.cases)
       .where(eq(schema.cases.id, caseId))
       .limit(1);
-    if (!row) return null;
+    if (!row) return { kind: "not_found" as const };
+    if (!MARK_READY_ALLOWED_STATUSES.has(row.status)) {
+      return { kind: "conflict" as const, current: row.status };
+    }
     await tx
       .update(schema.cases)
       .set({ status: "ready_for_review" })
       .where(eq(schema.cases.id, caseId));
-    return row.status;
+    return { kind: "ok" as const, before: row.status };
   });
-  if (before === null) return notFoundResponse(c);
+  if (outcome.kind === "not_found") return notFoundResponse(c);
+  if (outcome.kind === "conflict") {
+    return c.json(
+      {
+        type: "https://errors.cred/case/invalid-state",
+        title: `Case is in ${outcome.current}; mark-ready requires awaiting_provider, references_pending, or attestation_pending.`,
+        status: 409,
+        instance: c.var.requestId,
+      },
+      409,
+    );
+  }
 
   await audit({
     workspaceId: c.var.tenancy.workspaceId,
@@ -101,7 +115,7 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/mark-ready", async (c) => {
     action: "case.marked_ready",
     targetEntityType: "case",
     targetEntityId: caseId,
-    before: { status: before },
+    before: { status: outcome.before },
     after: { status: "ready_for_review" },
     requestId: c.var.requestId,
   });
@@ -109,50 +123,122 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/mark-ready", async (c) => {
   return new Response(null, { status: 204 });
 });
 
-const SubmitBody = z.object({
-  confirmedKeys: z.array(z.string().min(1)).min(1).max(60).optional(),
+// ─── POST /v1/cockpit/cases/:caseId/complete ─────────────────────────────
+// Close a submitted case. Sets status=`completed` + completedAt. Requires
+// status=`submitted` — a case that hasn't been sent to the hospital
+// shouldn't be closable from the cockpit.
+cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/complete", async (c) => {
+  const auth = c.var.staffAuth;
+  const caseId = c.req.param("caseId");
+
+  const outcome = await withTenancy(c.var.tenancy, async (tx) => {
+    const [row] = await tx
+      .select({ status: schema.cases.status })
+      .from(schema.cases)
+      .where(eq(schema.cases.id, caseId))
+      .limit(1);
+    if (!row) return { kind: "not_found" as const };
+    if (row.status !== "submitted") {
+      return { kind: "conflict" as const, current: row.status };
+    }
+    await tx
+      .update(schema.cases)
+      .set({ status: "completed", completedAt: new Date() })
+      .where(eq(schema.cases.id, caseId));
+    return { kind: "ok" as const, before: row.status };
+  });
+  if (outcome.kind === "not_found") return notFoundResponse(c);
+  if (outcome.kind === "conflict") {
+    return c.json(
+      {
+        type: "https://errors.cred/case/invalid-state",
+        title: `Case is in ${outcome.current}; complete requires submitted.`,
+        status: 409,
+        instance: c.var.requestId,
+      },
+      409,
+    );
+  }
+
+  await audit({
+    workspaceId: c.var.tenancy.workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "case.completed",
+    targetEntityType: "case",
+    targetEntityId: caseId,
+    before: { status: outcome.before },
+    after: { status: "completed" },
+    requestId: c.var.requestId,
+  });
+
+  return new Response(null, { status: 204 });
 });
 
+// ─── POST /v1/cockpit/cases/:caseId/withdraw ─────────────────────────────
+// Withdraw an in-flight case (provider dropped out, facility changed
+// requirements, etc). Requires a short reason for the audit trail.
+// Allowed from any non-terminal status.
+const WithdrawBody = z.object({
+  reason: z.string().min(1).max(500),
+});
 cockpitCaseRoutes.post(
-  "/v1/cockpit/cases/:caseId/submit",
-  zValidator("json", SubmitBody),
+  "/v1/cockpit/cases/:caseId/withdraw",
+  zValidator("json", WithdrawBody),
   async (c) => {
     const auth = c.var.staffAuth;
     const caseId = c.req.param("caseId");
     const body = c.req.valid("json");
 
-    const before = await withTenancy(c.var.tenancy, async (tx) => {
+    const outcome = await withTenancy(c.var.tenancy, async (tx) => {
       const [row] = await tx
-        .select({ status: schema.cases.status, submittedAt: schema.cases.submittedAt })
+        .select({ status: schema.cases.status })
         .from(schema.cases)
         .where(eq(schema.cases.id, caseId))
         .limit(1);
-      if (!row) return null;
-      if (row.submittedAt) return { conflict: true as const };
-      await tx
-        .update(schema.cases)
-        .set({ status: "submitted", submittedAt: new Date() })
-        .where(eq(schema.cases.id, caseId));
-      return { conflict: false as const, status: row.status };
+      if (!row) return { kind: "not_found" as const };
+      if (row.status === "completed" || row.status === "withdrawn") {
+        return { kind: "conflict" as const, current: row.status };
+      }
+      await tx.update(schema.cases).set({ status: "withdrawn" }).where(eq(schema.cases.id, caseId));
+      return { kind: "ok" as const, before: row.status };
     });
-    if (before === null) return notFoundResponse(c);
-    if (before.conflict) return conflictResponse(c, "case_already_submitted");
+    if (outcome.kind === "not_found") return notFoundResponse(c);
+    if (outcome.kind === "conflict") {
+      return c.json(
+        {
+          type: "https://errors.cred/case/invalid-state",
+          title: `Case is already ${outcome.current}; can't withdraw.`,
+          status: 409,
+          instance: c.var.requestId,
+        },
+        409,
+      );
+    }
 
     await audit({
       workspaceId: c.var.tenancy.workspaceId,
       actorUserId: auth.session.userId,
       actorType: "user",
-      action: "case.submitted",
+      action: "case.withdrawn",
       targetEntityType: "case",
       targetEntityId: caseId,
-      before: { status: before.status },
-      after: { confirmedKeyCount: body.confirmedKeys?.length ?? 0 },
+      before: { status: outcome.before },
+      after: { status: "withdrawn", reason: body.reason },
       requestId: c.var.requestId,
     });
 
     return new Response(null, { status: 204 });
   },
 );
+
+// The audit-only POST /v1/cockpit/cases/:caseId/submit was removed in
+// this PR. It flipped case.status to "submitted" without inserting a
+// packets row, so cases ended up "submitted" with no PDF artifact and
+// no recorded submission method — the packet endpoints
+// (/packet/assemble + /packet/submit) are the canonical path and
+// enforce the checklist / attestation gates. The FE now posts to
+// those directly.
 
 const EscalateBody = z.object({
   reason: z.enum([
