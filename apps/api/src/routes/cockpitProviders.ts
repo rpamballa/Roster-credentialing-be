@@ -1007,3 +1007,151 @@ cockpitProviderRoutes.delete("/v1/cockpit/providers/:providerId/documents/:docId
 // Silence "declared but never read" — `ProviderInviteInvalidError` is
 // re-exported here for the redemption endpoint to catch typed.
 export { ProviderInviteInvalidError };
+
+// ─── PATCH /v1/cockpit/providers/:providerId ─────────────────────────────
+// Edit the workspace-scoped view of a provider's profile. Providers are
+// intentionally not workspace-scoped at the row level (schema §4.1), so
+// this endpoint updates the shared providers row after verifying the
+// caller's workspace holds a grant. All fields are optional; only the
+// ones present in the body are updated.
+//
+// Not editable here: userId (managed by the invite/redeem flow), email
+// (identity, would require a re-verify hop), createdAt, ssnEncrypted.
+
+const ProviderPatchBody = z.object({
+  firstName: z.string().trim().min(1).max(120).optional(),
+  lastName: z.string().trim().min(1).max(120).optional(),
+  npi: z
+    .string()
+    .trim()
+    .regex(/^\d{10}$/u, "NPI must be 10 digits")
+    .nullish(),
+  phone: z.string().trim().max(40).nullish(),
+  dob: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u, "expected YYYY-MM-DD")
+    .nullish(),
+  specialties: z.array(z.string().trim().min(1).max(120)).max(20).optional(),
+  statesLicensed: z.array(z.string().trim().length(2).toUpperCase()).max(56).optional(),
+});
+
+cockpitProviderRoutes.patch(
+  "/v1/cockpit/providers/:providerId",
+  zValidator("json", ProviderPatchBody),
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const providerId = c.req.param("providerId");
+    const body = c.req.valid("json");
+
+    const granted = await ensureGrantedProvider(c.var.tenancy.workspaceId, providerId);
+    if (!granted) return notFoundResponse(c);
+
+    // Only pass through fields the client actually sent. Drizzle rejects
+    // undefined values with strict typing, so we filter first.
+    const patch: Record<string, unknown> = {};
+    if (body.firstName !== undefined) patch.firstName = body.firstName;
+    if (body.lastName !== undefined) patch.lastName = body.lastName;
+    if (body.npi !== undefined) patch.npi = body.npi;
+    if (body.phone !== undefined) patch.phone = body.phone;
+    if (body.dob !== undefined) patch.dob = body.dob;
+    if (body.specialties !== undefined) patch.specialties = body.specialties;
+    if (body.statesLicensed !== undefined) patch.statesLicensed = body.statesLicensed;
+
+    if (Object.keys(patch).length === 0) {
+      return c.json(
+        {
+          type: "https://errors.cred/provider/no-changes",
+          title: "No fields to update",
+          status: 400,
+          instance: c.var.requestId,
+        },
+        400,
+      );
+    }
+    patch.updatedAt = new Date();
+
+    // rls: bypass — providers is workspace-independent; workspace is
+    // enforced by the grant check above.
+    await db().update(schema.providers).set(patch).where(eq(schema.providers.id, providerId));
+
+    await audit({
+      workspaceId: c.var.tenancy.workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "provider.updated",
+      targetEntityType: "provider",
+      targetEntityId: providerId,
+      after: patch,
+      requestId: c.var.requestId,
+    });
+
+    return c.body(null, 204);
+  },
+);
+
+// ─── PATCH /v1/cockpit/providers/:providerId/documents/:docId ────────────
+// Update editable metadata on a provider document. Currently: expiresAt
+// (used to drive re-collection alerts on the pipeline). extractedFields
+// updates go through a separate purpose-built endpoint; content-type,
+// fileUri, and the storage bytes are immutable once uploaded.
+
+const DocumentPatchBody = z.object({
+  expiresAt: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/u, "expected YYYY-MM-DD")
+    .nullish(),
+});
+
+cockpitProviderRoutes.patch(
+  "/v1/cockpit/providers/:providerId/documents/:docId",
+  zValidator("json", DocumentPatchBody),
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const providerId = c.req.param("providerId");
+    const docId = c.req.param("docId");
+    const body = c.req.valid("json");
+
+    const granted = await ensureGrantedProvider(c.var.tenancy.workspaceId, providerId);
+    if (!granted) return notFoundResponse(c);
+
+    const [doc] = await db()
+      .select({ id: schema.documents.id })
+      .from(schema.documents)
+      .where(and(eq(schema.documents.id, docId), eq(schema.documents.providerId, providerId)))
+      .limit(1);
+    if (!doc) return notFoundResponse(c);
+
+    // Coerce YYYY-MM-DD to a Date at UTC midnight. Providers give us
+    // calendar-day expirations, not timestamps.
+    const patch: { expiresAt?: Date | null } = {};
+    if (body.expiresAt !== undefined) {
+      patch.expiresAt = body.expiresAt ? new Date(`${body.expiresAt}T00:00:00Z`) : null;
+    }
+    if (Object.keys(patch).length === 0) {
+      return c.json(
+        {
+          type: "https://errors.cred/document/no-changes",
+          title: "No fields to update",
+          status: 400,
+          instance: c.var.requestId,
+        },
+        400,
+      );
+    }
+
+    await db().update(schema.documents).set(patch).where(eq(schema.documents.id, docId));
+
+    await audit({
+      workspaceId: c.var.tenancy.workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "document.updated",
+      targetEntityType: "document",
+      targetEntityId: docId,
+      after: { expiresAt: body.expiresAt ?? null },
+      requestId: c.var.requestId,
+    });
+
+    return c.body(null, 204);
+  },
+);

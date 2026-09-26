@@ -205,6 +205,8 @@ export const cockpitTypeDefs = /* GraphQL */ `
       id: ID!
       name: String!
       profileId: ID!
+      address: String
+      ein: String
     }
 
     type RequirementRow {

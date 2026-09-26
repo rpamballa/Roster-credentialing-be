@@ -995,3 +995,132 @@ cockpitCaseRoutes.delete("/v1/cockpit/cases/:caseId/notes/:noteId", async (c) =>
 
   return c.body(null, 204);
 });
+
+// ─── GET /v1/cockpit/specialists ─────────────────────────────────────────
+// List staff members of the current workspace who can own a case.
+// Powers the specialist reassign picker on the case detail. Filter by
+// role — read-only viewers can't own cases so we exclude them.
+cockpitCaseRoutes.get("/v1/cockpit/specialists", async (c) => {
+  const workspaceId = c.var.tenancy.workspaceId;
+
+  const rows = await withTenancy(c.var.tenancy, async (tx) =>
+    tx
+      .select({
+        id: schema.users.id,
+        name: schema.users.name,
+        email: schema.users.email,
+        role: schema.memberships.role,
+      })
+      .from(schema.memberships)
+      .innerJoin(schema.users, eq(schema.users.id, schema.memberships.userId))
+      .where(
+        and(
+          eq(schema.memberships.workspaceId, workspaceId),
+          sql`${schema.memberships.role} IN ('owner', 'admin', 'specialist')`,
+        ),
+      )
+      .orderBy(schema.users.name),
+  );
+
+  return c.json({
+    specialists: rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      email: r.email,
+      role: r.role,
+    })),
+  });
+});
+
+// ─── PATCH /v1/cockpit/cases/:caseId/specialist ──────────────────────────
+// Reassign the case to a different specialist in the workspace. Enforces
+// that the target user is a workspace member with an owning role.
+const SpecialistPatchBody = z.object({
+  assignedSpecialistId: z.string().uuid().nullable(),
+});
+
+cockpitCaseRoutes.patch(
+  "/v1/cockpit/cases/:caseId/specialist",
+  zValidator("json", SpecialistPatchBody),
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const caseId = c.req.param("caseId");
+    const body = c.req.valid("json");
+
+    const outcome = await withTenancy(c.var.tenancy, async (tx) => {
+      const [cs] = await tx
+        .select({
+          id: schema.cases.id,
+          assignedSpecialistId: schema.cases.assignedSpecialistId,
+        })
+        .from(schema.cases)
+        .where(eq(schema.cases.id, caseId))
+        .limit(1);
+      if (!cs) return { kind: "not_found" as const };
+
+      // Verify the target user (if any) is a workspace member with an
+      // owning role. Null means "unassign", which is allowed.
+      if (body.assignedSpecialistId !== null) {
+        const [m] = await tx
+          .select({ role: schema.memberships.role })
+          .from(schema.memberships)
+          .where(
+            and(
+              eq(schema.memberships.userId, body.assignedSpecialistId),
+              eq(schema.memberships.workspaceId, c.var.tenancy.workspaceId),
+            ),
+          )
+          .limit(1);
+        if (!m) return { kind: "not_in_workspace" as const };
+        if (m.role !== "owner" && m.role !== "admin" && m.role !== "specialist") {
+          return { kind: "not_owning_role" as const };
+        }
+      }
+
+      await tx
+        .update(schema.cases)
+        .set({ assignedSpecialistId: body.assignedSpecialistId })
+        .where(eq(schema.cases.id, caseId));
+
+      return { kind: "ok" as const, before: cs.assignedSpecialistId };
+    });
+
+    if (outcome.kind === "not_found") return notFoundResponse(c);
+    if (outcome.kind === "not_in_workspace") {
+      return c.json(
+        {
+          type: "https://errors.cred/case/specialist-not-in-workspace",
+          title: "That specialist is not a member of this workspace.",
+          status: 422,
+          instance: c.var.requestId,
+        },
+        422,
+      );
+    }
+    if (outcome.kind === "not_owning_role") {
+      return c.json(
+        {
+          type: "https://errors.cred/case/specialist-role-insufficient",
+          title: "Read-only viewers can't own cases. Assign to a specialist, admin, or owner.",
+          status: 422,
+          instance: c.var.requestId,
+        },
+        422,
+      );
+    }
+
+    await audit({
+      workspaceId: c.var.tenancy.workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "case.specialist_reassigned",
+      targetEntityType: "case",
+      targetEntityId: caseId,
+      before: { assignedSpecialistId: outcome.before },
+      after: { assignedSpecialistId: body.assignedSpecialistId },
+      requestId: c.var.requestId,
+    });
+
+    return c.body(null, 204);
+  },
+);
