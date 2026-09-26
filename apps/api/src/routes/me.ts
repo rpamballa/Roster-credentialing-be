@@ -1,6 +1,6 @@
 import { db, schema } from "@cred/db";
 import type { MeResponse } from "@cred/types";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { requireStaffAuth } from "../middleware/session.js";
 import type { ApiBindings } from "../types.js";
@@ -39,13 +39,40 @@ meRoutes.get("/me", async (c) => {
 
   // rls: bypass — providers is workspace-independent; we look this user
   // up by user_id to expose the provider-portal path to the FE. Null
-  // for staff-only users; non-null triggers the /provider landing
+  // for staff-only users; non-null triggers the /welcome landing
   // instead of /cockpit in the cockpit layout.
-  const providerRows = await db()
+  //
+  // Two lookups, tried in order:
+  //   1. providers.user_id = users.id  — the modern link, set by the
+  //      /auth/password/set invite-redemption path.
+  //   2. providers.email  = users.email — a lazy heal for providers
+  //      created before the users→providers link existed (magic-link
+  //      redemptions pre-dating migration 0012). When we find one,
+  //      we UPDATE the providers row to persist the link so every
+  //      later call skips this fallback.
+  //
+  // The lazy heal is deliberately narrow: it only fires when the
+  // linked lookup misses, so a mis-typed user email never overwrites
+  // an existing user_id.
+  let providerRows = await db()
     .select({ id: schema.providers.id })
     .from(schema.providers)
     .where(eq(schema.providers.userId, auth.session.userId))
     .limit(1);
+
+  if (providerRows.length === 0) {
+    const linked = await db()
+      .update(schema.providers)
+      .set({ userId: auth.session.userId, updatedAt: new Date() })
+      .where(
+        and(
+          eq(sql`lower(${schema.providers.email})`, auth.session.email.toLowerCase()),
+          isNull(schema.providers.userId),
+        ),
+      )
+      .returning({ id: schema.providers.id });
+    providerRows = linked;
+  }
 
   const body: MeResponse = {
     userId: auth.session.userId,
