@@ -1027,9 +1027,24 @@ caseRoutes.post("/v1/cases/:caseId/ready", async (c) => {
   return c.json({ ok: true, status: "ready_to_submit" as FeCaseStatus });
 });
 
-// ─── 6.13  POST /v1/cases/:caseId/attestation/sign (stub) ────────────────
+// ─── 6.13  POST /v1/cases/:caseId/attestation/sign (self-attest MVP) ─────
+//
+// Beta model: the provider taps "I attest" in the app and we record a
+// completed attestations row per attestation the facility profile
+// requires. No DocuSign envelope, no external round-trip. A future
+// PR can flip this to the DocuSign path (packages/auth already has
+// createAttestationEnvelope + /cockpit/cases/:id/attestations/send
+// wired for that); the response shape is compatible either way.
+//
+// Idempotent: re-posting when all required attestations are already
+// completed is a no-op that returns { signed: true }. This makes the
+// FE simpler — it can call this on button tap AND after a router
+// refresh without worrying about duplicates.
 const SignAttestationSchema = z
   .object({
+    // Kept for wire-compatibility with the pre-MVP stub — the FE used
+    // to redirect to a DocuSign returnUrl. The self-attest path
+    // ignores it because there is no external hop to return from.
     returnUrl: z.string().url().optional(),
   })
   .optional();
@@ -1046,24 +1061,109 @@ caseRoutes.post(
     const tenancy = c.var.tenancy;
     const caseId = c.req.param("caseId");
 
-    // STUB — DocuSign integration intentionally deferred per audit
-    // constraints. Returns a fake `signingUrl` + `envelopeId` so the FE
-    // renders the redirect path end-to-end.
-    const envelopeId = "stub";
-    const signingUrl = "https://example.com/sign?envelope=stub";
+    const result = await withTenancy(tenancy, async (tx) => {
+      const [cs] = await tx
+        .select({
+          id: schema.cases.id,
+          facilityProfileId: schema.cases.facilityProfileId,
+        })
+        .from(schema.cases)
+        .where(eq(schema.cases.id, caseId))
+        .limit(1);
+      if (!cs) return { kind: "not_found" as const };
+      if (!cs.facilityProfileId) return { kind: "no_profile" as const };
+
+      const [profile] = await tx
+        .select({ requirements: schema.facilityProfiles.requirements })
+        .from(schema.facilityProfiles)
+        .where(eq(schema.facilityProfiles.id, cs.facilityProfileId))
+        .limit(1);
+      if (!profile) return { kind: "no_profile" as const };
+
+      const requirements = profile.requirements as FacilityRequirements;
+      const requiredAttestations = requirements.attestations ?? [];
+
+      // Fetch existing attestations up-front so we don't insert
+      // duplicates. Match by text — envelopeId is our synthetic
+      // (`self:<uuid>`) so it varies per insert.
+      const existing = await tx
+        .select({
+          id: schema.attestations.id,
+          text: schema.attestations.text,
+          status: schema.attestations.status,
+        })
+        .from(schema.attestations)
+        .where(eq(schema.attestations.caseId, caseId));
+
+      const existingCompletedTexts = new Set(
+        existing.filter((a) => a.status === "completed").map((a) => a.text),
+      );
+
+      const toInsert = requiredAttestations.filter((att) => !existingCompletedTexts.has(att.text));
+
+      const now = new Date();
+      let inserted = 0;
+      for (const att of toInsert) {
+        // Synthetic envelope id keeps the NOT NULL + UNIQUE constraint
+        // satisfied without a real DocuSign envelope. The `self:`
+        // prefix distinguishes self-attested rows from
+        // DocuSign-issued ones for downstream reporting.
+        const envelopeId = `self:${randomUUID()}`;
+        await tx.insert(schema.attestations).values({
+          workspaceId: tenancy.workspaceId,
+          caseId,
+          docusignEnvelopeId: envelopeId,
+          text: att.text,
+          status: "completed",
+          completedAt: now,
+        });
+        inserted += 1;
+      }
+      return {
+        kind: "ok" as const,
+        required: requiredAttestations.length,
+        inserted,
+      };
+    });
+
+    if (result.kind === "not_found") {
+      return c.json(
+        { type: "about:blank", title: "Not Found", status: 404, instance: c.var.requestId },
+        404,
+      );
+    }
+    if (result.kind === "no_profile") {
+      return c.json(
+        {
+          type: "https://errors.cred/attestation/missing_facility_profile",
+          title: "Case is missing a facility profile",
+          status: 409,
+          instance: c.var.requestId,
+        },
+        409,
+      );
+    }
 
     await audit({
       workspaceId: tenancy.workspaceId,
       actorUserId: null,
-      actorType: "agent",
-      action: "attestation.sign_requested_stub",
+      actorType: "user",
+      action: "attestation.self_signed",
       targetEntityType: "case",
       targetEntityId: caseId,
-      after: { envelopeId, signingUrl },
+      after: {
+        required: result.required,
+        inserted: result.inserted,
+      },
       requestId: c.var.requestId,
     });
 
-    return c.json({ signingUrl, envelopeId });
+    return c.json({
+      ok: true,
+      signed: true,
+      inserted: result.inserted,
+      required: result.required,
+    });
   },
 );
 

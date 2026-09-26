@@ -297,17 +297,24 @@ export async function caseDetailResolver(
     });
   }
 
-  const references: ReferenceGql[] = detail.refs.map(
-    (r): ReferenceGql => ({
+  const references: ReferenceGql[] = detail.refs.map((r): ReferenceGql => {
+    // organization is captured on the reference form (POST /v1/cases/:id/references)
+    // and persisted into response_fields.organization. Older cases may
+    // not have it set — coerce to empty string so the field stays
+    // NonNull in the GraphQL contract.
+    const responseFields = (r.responseFields as Record<string, unknown> | null) ?? null;
+    const rawOrganization = responseFields?.organization;
+    const organization = typeof rawOrganization === "string" ? rawOrganization : "";
+    return {
       id: r.id,
       fullName: r.name,
       email: r.email ?? "",
-      organization: "",
+      organization,
       relationship: r.relationship ?? "peer_physician",
       status: r.status,
       completedAt: r.respondedAt ? r.respondedAt.toISOString() : null,
-    }),
-  );
+    };
+  });
 
   const readyForSubmission =
     requirements.length > 0 &&
