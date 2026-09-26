@@ -320,6 +320,7 @@ export async function caseDetailResolver(
     slaRisk: computeSlaRisk(dtt),
     stage: stageFor(detail.cs.status),
     openedAt: detail.cs.openedAt.toISOString(),
+    purpose: detail.cs.purpose,
     targetSubmissionDate: target,
     submittedAt: detail.cs.submittedAt ? detail.cs.submittedAt.toISOString() : null,
     provider: {

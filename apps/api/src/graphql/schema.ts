@@ -179,6 +179,7 @@ export const cockpitTypeDefs = /* GraphQL */ `
       slaRisk: String!
       stage: String!
       openedAt: String!
+      purpose: String!
       targetSubmissionDate: String
       submittedAt: String
       readyForSubmission: Boolean!
