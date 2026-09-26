@@ -44,6 +44,30 @@ function humanizeFieldKey(key: string): string {
   return key.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
+// Human-readable label for a case_status_events row on the timeline.
+// Reason is appended when the transition carries one (currently just
+// withdrawals).
+function statusEventLabel(from: string | null, to: string, reason: string | null): string {
+  const base = (() => {
+    if (from === null) return "Case opened";
+    switch (to) {
+      case "ready_for_review":
+        return from === "awaiting_provider"
+          ? "Provider marked ready for review"
+          : "Marked ready for review";
+      case "submitted":
+        return "Packet submitted";
+      case "completed":
+        return "Case completed";
+      case "withdrawn":
+        return "Case withdrawn";
+      default:
+        return `Status → ${humanizeFieldKey(to)}`;
+    }
+  })();
+  return reason ? `${base}: ${reason}` : base;
+}
+
 /**
  * Normalize whatever shape the DB hands us into the canonical
  * `DomainExtractedField[]` array. Production rows are written by the AI
@@ -174,6 +198,25 @@ export async function caseDetailResolver(
       .from(schema.references)
       .where(eq(schema.references.caseId, cs.id));
 
+    // Ordered oldest-first for the timeline construction below —
+    // events are unioned with derived doc/case rows and sorted at
+    // the end.
+    const statusEvents = await tx
+      .select({
+        id: schema.caseStatusEvents.id,
+        fromStatus: schema.caseStatusEvents.fromStatus,
+        toStatus: schema.caseStatusEvents.toStatus,
+        actorType: schema.caseStatusEvents.actorType,
+        actorUserId: schema.caseStatusEvents.actorUserId,
+        reason: schema.caseStatusEvents.reason,
+        createdAt: schema.caseStatusEvents.createdAt,
+        actorName: schema.users.name,
+        actorEmail: schema.users.email,
+      })
+      .from(schema.caseStatusEvents)
+      .leftJoin(schema.users, eq(schema.users.id, schema.caseStatusEvents.actorUserId))
+      .where(eq(schema.caseStatusEvents.caseId, cs.id));
+
     let specialistName: string | null = null;
     if (cs.assignedSpecialistId) {
       const [u] = await tx
@@ -192,6 +235,7 @@ export async function caseDetailResolver(
       facilityAddress,
       facilityEin,
       requirements,
+      statusEvents,
       docs,
       refs,
       specialistName,
@@ -258,18 +302,33 @@ export async function caseDetailResolver(
 
   const blockers = mapBlockers(detail.cs.blockers);
 
-  // Synthesize a minimal timeline from the available row timestamps. A
-  // richer event log is M4+ work but the frontend renders any list of
-  // TimelineEvent it receives.
+  // Timeline is a merged event stream. Case status transitions are
+  // the authoritative record for milestones now (case_status_events
+  // table, migration 0017); the fallback "case_opened" event stays
+  // only for legacy cases that predate the events table.
   const timeline: TimelineEventGql[] = [];
-  timeline.push({
-    id: `tl_open_${detail.cs.id}`,
-    kind: "case_opened",
-    actor: "specialist",
-    actorName: detail.specialistName,
-    message: "Case opened",
-    timestamp: detail.cs.openedAt.toISOString(),
-  });
+  const hasOpenedEvent = detail.statusEvents.some((e) => e.fromStatus === null);
+  if (!hasOpenedEvent) {
+    timeline.push({
+      id: `tl_open_${detail.cs.id}`,
+      kind: "case_opened",
+      actor: "specialist",
+      actorName: detail.specialistName,
+      message: "Case opened",
+      timestamp: detail.cs.openedAt.toISOString(),
+    });
+  }
+  for (const ev of detail.statusEvents) {
+    const label = statusEventLabel(ev.fromStatus, ev.toStatus, ev.reason);
+    timeline.push({
+      id: `tl_status_${ev.id}`,
+      kind: `status.${ev.toStatus}`,
+      actor: ev.actorType === "system" ? "system" : ev.actorUserId ? "specialist" : "provider",
+      actorName: ev.actorName ?? ev.actorEmail ?? null,
+      message: label,
+      timestamp: ev.createdAt.toISOString(),
+    });
+  }
   for (const d of detail.docs) {
     timeline.push({
       id: `tl_doc_${d.id}_uploaded`,
@@ -290,7 +349,11 @@ export async function caseDetailResolver(
       });
     }
   }
-  if (detail.cs.submittedAt) {
+  // Only emit the legacy "Packet submitted" event when the status
+  // events table doesn't already carry it (case submitted before
+  // migration 0017 was applied).
+  const hasSubmittedEvent = detail.statusEvents.some((e) => e.toStatus === "submitted");
+  if (detail.cs.submittedAt && !hasSubmittedEvent) {
     timeline.push({
       id: `tl_submitted_${detail.cs.id}`,
       kind: "submitted",
