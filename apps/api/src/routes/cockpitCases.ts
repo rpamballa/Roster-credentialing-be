@@ -826,3 +826,172 @@ cockpitCaseRoutes.post("/v1/cockpit/cases", zValidator("json", CreateCaseBody), 
     201,
   );
 });
+
+// ─── Case notes ──────────────────────────────────────────────────────────
+// Specialist-facing free-text notes on a case. Persists to case_notes
+// (migration 0015). Soft-delete keeps the audit trail intact while
+// letting the UI hide corrected/withdrawn notes.
+//
+// GET  /v1/cockpit/cases/:caseId/notes                 — list undeleted, newest first
+// POST /v1/cockpit/cases/:caseId/notes  { body }       — create
+// DELETE /v1/cockpit/cases/:caseId/notes/:noteId       — soft-delete (author or workspace admin only,
+//                                                        enforced by tenancy + author check)
+
+const NoteBody = z.object({
+  body: z
+    .string()
+    .min(1)
+    .max(4000)
+    .transform((v) => v.trim()),
+});
+
+cockpitCaseRoutes.get("/v1/cockpit/cases/:caseId/notes", async (c) => {
+  const caseId = c.req.param("caseId");
+
+  const rows = await withTenancy(c.var.tenancy, async (tx) => {
+    // Verify case is in this workspace first — the notes table joins
+    // on cases.id + workspace_id via the FK, but the RLS layer isn't
+    // wired in this route so an explicit predicate is the guard.
+    const [cs] = await tx
+      .select({ id: schema.cases.id })
+      .from(schema.cases)
+      .where(eq(schema.cases.id, caseId))
+      .limit(1);
+    if (!cs) return null;
+
+    return await tx
+      .select({
+        id: schema.caseNotes.id,
+        body: schema.caseNotes.body,
+        createdAt: schema.caseNotes.createdAt,
+        authorUserId: schema.caseNotes.authorUserId,
+        authorName: schema.users.name,
+        authorEmail: schema.users.email,
+      })
+      .from(schema.caseNotes)
+      .leftJoin(schema.users, eq(schema.users.id, schema.caseNotes.authorUserId))
+      .where(and(eq(schema.caseNotes.caseId, caseId), sql`${schema.caseNotes.deletedAt} IS NULL`))
+      .orderBy(desc(schema.caseNotes.createdAt));
+  });
+
+  if (rows === null) return notFoundResponse(c);
+
+  return c.json({
+    notes: rows.map((r) => ({
+      id: r.id,
+      body: r.body,
+      createdAt: r.createdAt.toISOString(),
+      author: r.authorUserId
+        ? {
+            id: r.authorUserId,
+            name: r.authorName,
+            email: r.authorEmail,
+          }
+        : null,
+    })),
+  });
+});
+
+cockpitCaseRoutes.post(
+  "/v1/cockpit/cases/:caseId/notes",
+  zValidator("json", NoteBody),
+  async (c) => {
+    const auth = c.var.staffAuth;
+    const caseId = c.req.param("caseId");
+    const body = c.req.valid("json");
+
+    const inserted = await withTenancy(c.var.tenancy, async (tx) => {
+      const [cs] = await tx
+        .select({ id: schema.cases.id })
+        .from(schema.cases)
+        .where(eq(schema.cases.id, caseId))
+        .limit(1);
+      if (!cs) return null;
+
+      const [row] = await tx
+        .insert(schema.caseNotes)
+        .values({
+          workspaceId: c.var.tenancy.workspaceId,
+          caseId,
+          authorUserId: auth.session.userId,
+          body: body.body,
+        })
+        .returning({ id: schema.caseNotes.id, createdAt: schema.caseNotes.createdAt });
+      return row ?? null;
+    });
+
+    if (!inserted) return notFoundResponse(c);
+
+    await audit({
+      workspaceId: c.var.tenancy.workspaceId,
+      actorUserId: auth.session.userId,
+      actorType: "user",
+      action: "case.note_added",
+      targetEntityType: "case",
+      targetEntityId: caseId,
+      after: { noteId: inserted.id },
+      requestId: c.var.requestId,
+    });
+
+    return c.json({ id: inserted.id, createdAt: inserted.createdAt.toISOString() }, 201);
+  },
+);
+
+cockpitCaseRoutes.delete("/v1/cockpit/cases/:caseId/notes/:noteId", async (c) => {
+  const auth = c.var.staffAuth;
+  const caseId = c.req.param("caseId");
+  const noteId = c.req.param("noteId");
+
+  const outcome = await withTenancy(c.var.tenancy, async (tx) => {
+    const [row] = await tx
+      .select({
+        id: schema.caseNotes.id,
+        authorUserId: schema.caseNotes.authorUserId,
+        deletedAt: schema.caseNotes.deletedAt,
+      })
+      .from(schema.caseNotes)
+      .where(and(eq(schema.caseNotes.id, noteId), eq(schema.caseNotes.caseId, caseId)))
+      .limit(1);
+    if (!row) return { kind: "not_found" as const };
+    if (row.deletedAt) return { kind: "already_deleted" as const };
+    // Only the author can soft-delete their note. Team-level deletion
+    // is intentionally out of scope for now — a specialist worried
+    // about a peer's note should ask the author or escalate.
+    if (row.authorUserId !== auth.session.userId) return { kind: "forbidden" as const };
+
+    await tx
+      .update(schema.caseNotes)
+      .set({ deletedAt: new Date() })
+      .where(eq(schema.caseNotes.id, noteId));
+    return { kind: "ok" as const };
+  });
+
+  if (outcome.kind === "not_found") return notFoundResponse(c);
+  if (outcome.kind === "already_deleted") {
+    return c.body(null, 204);
+  }
+  if (outcome.kind === "forbidden") {
+    return c.json(
+      {
+        type: "https://errors.cred/case/note-forbidden",
+        title: "Only the note author can delete this note.",
+        status: 403,
+        instance: c.var.requestId,
+      },
+      403,
+    );
+  }
+
+  await audit({
+    workspaceId: c.var.tenancy.workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "case.note_deleted",
+    targetEntityType: "case",
+    targetEntityId: caseId,
+    after: { noteId },
+    requestId: c.var.requestId,
+  });
+
+  return c.body(null, 204);
+});

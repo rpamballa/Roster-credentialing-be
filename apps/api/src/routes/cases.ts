@@ -892,6 +892,11 @@ caseRoutes.post(
           name: body.fullName,
           email: body.email,
           relationship: body.relationship,
+          // Write to the first-class column (migration 0016) and the
+          // legacy JSONB slot in the same insert so the caseDetail
+          // resolver's fallback still resolves during rollout. A
+          // future PR drops the JSONB duplicate.
+          organization: body.organization,
           status: "pending",
           responseFields: { organization: body.organization },
         })
