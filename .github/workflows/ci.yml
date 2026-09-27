@@ -1,16 +1,7 @@
 name: ci
 
-# Fires on every PR and on push to main. Both events run the exact
-# same job so branch-protection can gate merges on the `quality` check.
-#
-# Kept deliberately minimal — typecheck + biome only — because the
-# repo has no runnable test suite or migration harness yet. Broken
-# `pnpm test` and `pnpm --filter @cred/db migrate` steps in the
-# previous elaborate CI are why the workflow was disabled manually
-# in the first place; a red gate that no one trusts is worse than no
-# gate. Grow this list as those pieces are wired up: integration
-# tests behind a Postgres service, Anthropic client unit tests,
-# migration idempotency check.
+# Fires on every PR and on push to main. Both events run the same
+# jobs so branch-protection can gate merges on `quality`.
 
 on:
   push:
@@ -29,6 +20,36 @@ jobs:
   quality:
     name: quality
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cred
+          POSTGRES_PASSWORD: cred
+          POSTGRES_DB: cred_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cred -d cred_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://cred:cred@localhost:5432/cred_test
+      REDIS_URL: redis://localhost:6379/1
+      SESSION_SECRET: ci-session-secret-1234567890
+      NODE_ENV: test
+      API_PUBLIC_URL: http://localhost:3001
+      WEB_PUBLIC_URL: http://localhost:3000
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -43,3 +64,5 @@ jobs:
         run: pnpm typecheck
       - name: Biome (lint + format check)
         run: pnpm exec biome check
+      - name: Vitest — integration tests hit real Postgres + Redis via services
+        run: pnpm --filter @cred/api test

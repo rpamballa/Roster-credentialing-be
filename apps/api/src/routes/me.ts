@@ -1,20 +1,43 @@
 import { db, schema } from "@cred/db";
 import type { MeResponse } from "@cred/types";
 import { eq } from "drizzle-orm";
+import type { Context } from "hono";
 import { Hono } from "hono";
-import { requireStaffAuth } from "../middleware/session.js";
+import { requireAuth, requireStaffAuth } from "../middleware/session.js";
 import type { ApiBindings } from "../types.js";
 
 export const meRoutes = new Hono<ApiBindings>();
 
-// Scope auth to the exact paths this router serves. `use("*", ...)` would
-// flatten onto the main app via `app.route("/", meRoutes)` and 401 every
-// other route in the system (including health checks and the demo-signin
-// endpoint).
-meRoutes.use("/me", requireStaffAuth);
+/**
+ * /me accepts EITHER a staff or provider session. Staff sessions get
+ * the full viewer (memberships, providerId link, name). Provider
+ * magic-link sessions get a minimal viewer keyed on the session's
+ * providerId — no memberships, no user identity beyond what the
+ * provider row carries. This keeps the FE getViewer() simple: one
+ * fetch, one shape, one redirect on 401.
+ */
+meRoutes.use("/me", requireAuth);
 meRoutes.use("/v1/workspace/me", requireStaffAuth);
 
 meRoutes.get("/me", async (c) => {
+  const auth = c.var.auth;
+  if (!auth) {
+    return c.json(
+      { type: "about:blank", title: "Unauthorized", status: 401, instance: c.var.requestId },
+      401,
+    );
+  }
+
+  if (auth.session.kind === "provider") {
+    return handleProviderMe(c, auth.session.providerId);
+  }
+  c.set("staffAuth", { sid: auth.sid, session: auth.session });
+  return handleStaffMe(c);
+});
+
+// The staff-session branch — original behavior, kept structurally the
+// same so the tests + FE contract stay stable.
+async function handleStaffMe(c: Context<ApiBindings>) {
   const auth = c.var.staffAuth;
 
   // rls: bypass — listing a user's own memberships before any workspace
@@ -69,7 +92,37 @@ meRoutes.get("/me", async (c) => {
     providerId: providerRow?.id ?? null,
   };
   return c.json(body);
-});
+}
+
+// The provider-session branch — returns a minimal viewer shape. No
+// users row lookup because a magic-link provider session isn't tied
+// to a users.id.
+async function handleProviderMe(c: Context<ApiBindings>, providerId: string) {
+  const rows = await db()
+    .select({
+      id: schema.providers.id,
+      firstName: schema.providers.firstName,
+      lastName: schema.providers.lastName,
+      email: schema.providers.email,
+    })
+    .from(schema.providers)
+    .where(eq(schema.providers.id, providerId))
+    .limit(1);
+  const provider = rows[0];
+  const name = provider ? `${provider.firstName} ${provider.lastName}`.trim() || null : null;
+
+  // MeResponse shape kept identical to staff so getViewer() on the FE
+  // doesn't need a discriminated union. providerId is populated,
+  // memberships is empty (magic-link providers aren't staff).
+  const body: MeResponse = {
+    userId: providerId, // best-available identifier for provider-only sessions
+    email: provider?.email ?? "",
+    name,
+    memberships: [],
+    providerId,
+  };
+  return c.json(body);
+}
 
 /**
  * GET /v1/workspace/me — the active workspace's display context.
