@@ -1,4 +1,6 @@
 import { type ProviderSessionPayload, type StaffSessionPayload, readSession } from "@cred/auth";
+import { db, schema } from "@cred/db";
+import { and, eq } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import type { ApiBindings } from "../types.js";
@@ -36,12 +38,79 @@ export const requireStaffAuth: MiddlewareHandler<ApiBindings> = async (c, next) 
   await next();
 };
 
-/** Gate: provider session only. Narrows c.var.providerAuth for downstream. */
+/**
+ * Gate: any session whose caller effectively acts as the provider on
+ * this case. Two acceptance paths:
+ *
+ *   1. Case-scope provider session (magic-link redemption). This is the
+ *      original onboarding path — a first-time provider who's clicked
+ *      an invite email and hasn't set a password yet.
+ *
+ *   2. Staff-shape session whose user is linked (via
+ *      providers.user_id → users.id) to the provider that owns the
+ *      case in the URL. This covers the everyday case: a provider
+ *      who's set a password and signed in normally.
+ *
+ * Both paths land the same synthetic providerAuth downstream so the
+ * route handlers don't need to branch on session kind. Requires
+ * a :caseId route param — routes that don't have one shouldn't use
+ * this guard.
+ */
 export const requireProviderAuth: MiddlewareHandler<ApiBindings> = async (c, next) => {
   const auth = c.var.auth;
-  if (!auth || auth.session.kind !== "provider") return unauthorized(c);
-  c.set("providerAuth", { sid: auth.sid, session: auth.session });
-  await next();
+  if (!auth) return unauthorized(c);
+
+  // Case 1 — genuine provider session (magic-link).
+  if (auth.session.kind === "provider") {
+    c.set("providerAuth", { sid: auth.sid, session: auth.session });
+    return await next();
+  }
+
+  // Case 2 — staff session whose user is the provider on this case.
+  if (auth.session.kind === "staff") {
+    const caseIdParam = c.req.param("caseId");
+    if (!caseIdParam) return unauthorized(c);
+
+    // Join cases → providers, filtered by "provider is linked to the
+    // authenticated user AND owns this case". A miss on either
+    // predicate short-circuits to 401 without leaking which condition
+    // failed.
+    const rows = await db()
+      .select({
+        caseId: schema.cases.id,
+        providerId: schema.cases.providerId,
+        caseWorkspaceId: schema.cases.workspaceId,
+      })
+      .from(schema.cases)
+      .innerJoin(
+        schema.providers,
+        and(
+          eq(schema.providers.id, schema.cases.providerId),
+          eq(schema.providers.userId, auth.session.userId),
+        ),
+      )
+      .where(eq(schema.cases.id, caseIdParam))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return unauthorized(c);
+
+    // Synthesize a ProviderSessionPayload for downstream handlers.
+    // Keeping the same shape means the route code doesn't branch on
+    // how the session was established.
+    c.set("providerAuth", {
+      sid: auth.sid,
+      session: {
+        kind: "provider",
+        providerId: row.providerId,
+        caseId: row.caseId,
+        caseWorkspaceId: row.caseWorkspaceId,
+        createdAt: new Date().toISOString(),
+      },
+    });
+    return await next();
+  }
+
+  return unauthorized(c);
 };
 
 declare module "hono" {

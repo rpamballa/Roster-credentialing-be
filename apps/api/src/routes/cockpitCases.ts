@@ -424,13 +424,21 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/invite-provider", async (c) =>
       .where(eq(schema.cases.id, caseId))
       .limit(1);
     if (!row) return null;
+    // Also fetch the provider's user account state (if any) so we can
+    // decide between a magic-link email and a sign-in-and-continue
+    // email. A provider counts as "has account" when they have a
+    // linked users row with a password already set — a users row
+    // without a password can't be signed into.
     const [provider] = await tx
       .select({
         email: schema.providers.email,
         firstName: schema.providers.firstName,
         lastName: schema.providers.lastName,
+        userId: schema.providers.userId,
+        userPasswordHash: schema.users.passwordHash,
       })
       .from(schema.providers)
+      .leftJoin(schema.users, eq(schema.users.id, schema.providers.userId))
       .where(eq(schema.providers.id, row.providerId))
       .limit(1);
     return { caseRow: row, provider: provider ?? null };
@@ -438,16 +446,31 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/invite-provider", async (c) =>
 
   if (!detail) return notFoundResponse(c);
 
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-  const { token } = await issueCaseAccessToken({
-    caseId: detail.caseRow.id,
-    providerId: detail.caseRow.providerId,
-    workspaceId: c.var.tenancy.workspaceId,
-    expiresAt,
-    issuedByUserId: auth.session.userId,
-  });
+  const providerHasAccount = Boolean(detail.provider?.userId && detail.provider.userPasswordHash);
 
-  const url = new URL(`/invite/${token}`, env().WEB_PUBLIC_URL).toString();
+  // Signed-up providers get a direct link — they don't need a magic
+  // link once they can sign in with their password. First-time
+  // providers still get the /invite/[token] onboarding path.
+  let url: string;
+  let expiresAt: Date;
+  if (providerHasAccount) {
+    const nextPath = `/case/${detail.caseRow.id}`;
+    url = new URL(`/signin?next=${encodeURIComponent(nextPath)}`, env().WEB_PUBLIC_URL).toString();
+    // A sign-in link doesn't expire — but the response still carries
+    // an expiresAt for the cockpit UI's clipboard modal, so pick a
+    // generous window. Nothing on the BE consumes this value.
+    expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  } else {
+    expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const { token } = await issueCaseAccessToken({
+      caseId: detail.caseRow.id,
+      providerId: detail.caseRow.providerId,
+      workspaceId: c.var.tenancy.workspaceId,
+      expiresAt,
+      issuedByUserId: auth.session.userId,
+    });
+    url = new URL(`/invite/${token}`, env().WEB_PUBLIC_URL).toString();
+  }
 
   await audit({
     workspaceId: c.var.tenancy.workspaceId,
@@ -492,13 +515,19 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/invite-provider", async (c) =>
   if (detail.provider?.email) {
     try {
       const greeting = detail.provider.firstName?.trim() || "there";
-      await sendEmail({
-        to: detail.provider.email,
-        subject: "Roster Healthcare — start your credentialing packet",
-        text: `Hi ${greeting},\n\nYou've been invited to complete a credentialing case with Roster Healthcare. Get started here:\n\n${url}\n\nThis link expires in 7 days and can only be used from this device.\n\n— The Roster Healthcare team`,
-      });
+      const subject = providerHasAccount
+        ? "Roster Healthcare — your next credentialing case is ready"
+        : "Roster Healthcare — start your credentialing packet";
+      const text = providerHasAccount
+        ? `Hi ${greeting},\n\nA new credentialing case has been opened for you at Roster Healthcare. Sign in with your existing password to continue:\n\n${url}\n\n— The Roster Healthcare team`
+        : `Hi ${greeting},\n\nYou've been invited to complete a credentialing case with Roster Healthcare. Get started here:\n\n${url}\n\nThis link expires in 7 days and can only be used from this device.\n\n— The Roster Healthcare team`;
+      await sendEmail({ to: detail.provider.email, subject, text });
       logger.info(
-        { caseId: detail.caseRow.id, providerId: detail.caseRow.providerId },
+        {
+          caseId: detail.caseRow.id,
+          providerId: detail.caseRow.providerId,
+          flavor: providerHasAccount ? "sign_in" : "magic_link",
+        },
         "provider_invite_email_sent",
       );
     } catch (err) {

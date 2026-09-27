@@ -1,5 +1,3 @@
-import { issueCaseAccessToken } from "@cred/auth";
-import { env } from "@cred/config";
 import { db, schema } from "@cred/db";
 import { audit } from "@cred/observability";
 import { and, desc, eq } from "drizzle-orm";
@@ -95,6 +93,8 @@ providerMeRoutes.post("/v1/provider/me/cases/:caseId/open", async (c) => {
     );
   }
 
+  // Confirm the case belongs to this provider — otherwise we return a
+  // 404 so the FE can't be used to fish for other providers' cases.
   // rls: bypass — case lookup keyed on caseId + the caller's own
   // providerId, so this can only return a case the provider owns.
   const [row] = await db()
@@ -114,15 +114,10 @@ providerMeRoutes.post("/v1/provider/me/cases/:caseId/open", async (c) => {
     );
   }
 
-  const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-  const { token } = await issueCaseAccessToken({
-    caseId: row.id,
-    providerId,
-    workspaceId: row.workspaceId,
-    expiresAt,
-    issuedByUserId: auth.session.userId,
-  });
-
+  // Post-signup providers don't need a magic-link round-trip any more —
+  // requireProviderAuth on /v1/cases/:id now accepts the staff-shape
+  // session directly. Return a plain in-app path; the FE navigates
+  // there via a normal client-side transition.
   await audit({
     workspaceId: row.workspaceId,
     actorUserId: auth.session.userId,
@@ -130,10 +125,9 @@ providerMeRoutes.post("/v1/provider/me/cases/:caseId/open", async (c) => {
     action: "case_access.self_open",
     targetEntityType: "case",
     targetEntityId: row.id,
-    after: { providerId, expiresAt: expiresAt.toISOString() },
+    after: { providerId, path: `/case/${row.id}` },
     requestId: c.var.requestId,
   });
 
-  const url = new URL(`/invite/${token}`, env().WEB_PUBLIC_URL).toString();
-  return c.json({ url, caseId: row.id, expiresAt: expiresAt.toISOString() });
+  return c.json({ path: `/case/${row.id}`, caseId: row.id });
 });
