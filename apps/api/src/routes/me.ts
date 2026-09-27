@@ -39,20 +39,34 @@ meRoutes.get("/me", async (c) => {
 
   // rls: bypass — providers is workspace-independent; we look this user
   // up by user_id to expose the provider-portal path to the FE. Null
-  // for staff-only users; non-null triggers the /provider landing
+  // for staff-only users; non-null triggers the /welcome landing
   // instead of /cockpit in the cockpit layout.
+  //
+  // Also pulls the provider's first/last name so /me can fall back to
+  // them when users.name is null — legacy magic-link accounts often
+  // have no users.name set, which makes /welcome greet the provider
+  // as "Welcome back, provider." instead of by name.
   const providerRows = await db()
-    .select({ id: schema.providers.id })
+    .select({
+      id: schema.providers.id,
+      firstName: schema.providers.firstName,
+      lastName: schema.providers.lastName,
+    })
     .from(schema.providers)
     .where(eq(schema.providers.userId, auth.session.userId))
     .limit(1);
 
+  const providerRow = providerRows[0];
+  const providerName = providerRow
+    ? `${providerRow.firstName} ${providerRow.lastName}`.trim() || null
+    : null;
+
   const body: MeResponse = {
     userId: auth.session.userId,
     email: auth.session.email,
-    name: userRows[0]?.name ?? null,
+    name: userRows[0]?.name ?? providerName,
     memberships,
-    providerId: providerRows[0]?.id ?? null,
+    providerId: providerRow?.id ?? null,
   };
   return c.json(body);
 });

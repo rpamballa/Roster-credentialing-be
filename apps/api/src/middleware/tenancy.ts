@@ -66,12 +66,31 @@ export const requireTenancy: MiddlewareHandler<ApiBindings> = async (c, next) =>
   await next();
 };
 
-/** Provider: set tenancy from the case's workspace on a provider session. */
+/**
+ * Provider: set tenancy from the case's workspace.
+ *
+ * Reads from `c.var.providerAuth` — which `requireProviderAuth` sets
+ * for both genuine provider sessions (magic-link) and signed-in staff
+ * sessions whose user is linked to the case's provider (see
+ * middleware/session.ts). Neither raw c.var.auth kind is checked
+ * here because the synthesized providerAuth already carries the
+ * verified providerId + caseWorkspaceId.
+ *
+ * The staff userId is threaded into tenancy.userId when we can — it
+ * feeds RLS's `app.current_user_id` so audit rows land with a real
+ * actor. Provider magic-link sessions have no users.id, so we leave
+ * userId null there.
+ */
 export const requireProviderTenancy: MiddlewareHandler<ApiBindings> = async (c, next) => {
-  const auth = c.var.auth;
-  if (!auth || auth.session.kind !== "provider") return unauthorized(c);
-  // c.set returns void so it can't be in a destructure shape.
-  c.set("tenancy", { workspaceId: auth.session.caseWorkspaceId, userId: null });
-  c.set("providerAuth", { sid: auth.sid, session: auth.session });
+  const providerAuth = c.var.providerAuth;
+  if (!providerAuth) return unauthorized(c);
+
+  const rawAuth = c.var.auth;
+  const staffUserId = rawAuth && rawAuth.session.kind === "staff" ? rawAuth.session.userId : null;
+
+  c.set("tenancy", {
+    workspaceId: providerAuth.session.caseWorkspaceId,
+    userId: staffUserId,
+  });
   await next();
 };
