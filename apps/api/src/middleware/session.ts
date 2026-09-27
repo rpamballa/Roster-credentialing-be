@@ -68,7 +68,15 @@ export const requireProviderAuth: MiddlewareHandler<ApiBindings> = async (c, nex
 
   // Case 2 — staff session whose user is the provider on this case.
   if (auth.session.kind === "staff") {
-    const caseIdParam = c.req.param("caseId");
+    // caseId is parsed from the URL directly rather than
+    // c.req.param("caseId") because this middleware is mounted with
+    // caseRoutes.use("/v1/cases/*") — the wildcard doesn't populate
+    // route params, so c.req.param returns undefined. Match on
+    // /v1/cases/<uuid>/... at the path start.
+    const pathMatch = c.req.path.match(
+      /^\/v1\/cases\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i,
+    );
+    const caseIdParam = pathMatch?.[1];
     if (!caseIdParam) return unauthorized(c);
 
     // Join cases → providers, filtered by "provider is linked to the
