@@ -10,17 +10,11 @@ import type { ApiBindings } from "../types.js";
  * (i.e. staff-shape session where users.id → providers.user_id) to
  * discover and open their own cases.
  *
- * These are the counterpart of the case-scope magic-link surface
- * (/provider/case/*), which is gated by requireProviderAuth. The
- * password-session provider can't hit those routes directly, so we
- * expose a small bridge here: list their cases, and mint a case-scope
- * token on demand that lets them enter the case surface through the
- * existing /invite/[token] → /case/[caseId] flow — no changes needed
- * to requireProviderAuth or the case-scoped middleware.
- *
  * All endpoints are staff-session gated. The route resolves the
  * caller's providerId by joining providers.user_id = users.id and
- * refuses when the user isn't linked to a provider.
+ * refuses when the user isn't linked to a provider. Actual case work
+ * happens on `/v1/cases/:caseId/*`, whose requireProviderAuth branch
+ * accepts both magic-link and staff sessions (see middleware/session.ts).
  */
 export const providerMeRoutes = new Hono<ApiBindings>();
 
