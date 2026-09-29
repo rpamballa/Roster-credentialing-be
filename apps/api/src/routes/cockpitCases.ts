@@ -739,25 +739,73 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/invite-provider", async (c) =>
 
 const BulkNudgeBody = z.object({
   caseIds: z.array(z.string().min(1)).min(1).max(100),
-  message: z.string().min(1).max(320),
+  message: z.string().min(1).max(320).optional(),
+  channel: z.enum(["sms", "email", "sms_and_email"]).default("sms_and_email"),
 });
 
-// NOTE: /v1/cockpit/bulk-nudge is still audit-only and does NOT deliver
-// email/SMS. Same silent-broken class as the per-case /nudge (which
-// this PR fixed). Left alone here — the caller's fix scope was
-// "the per-provider nudge button". Fix bulk in a follow-up so its
-// change surface is reviewed on its own.
+/**
+ * Bulk nudge — the specialist has multi-selected N cases (with per-recipient
+ * checkboxes in BulkNudgeDialog) and wants to fan out a reminder. The
+ * handler joins each case's provider contact fields, calls the same
+ * `deliverNudge` helper the per-case /nudge uses, and returns a
+ * per-case outcome + aggregate counts. The audit row records the
+ * aggregate; the response body carries the detail so the dialog can
+ * show a toast like "12 emails sent, 8 SMS sent, 3 skipped (no phone)".
+ */
 cockpitCaseRoutes.post("/v1/cockpit/bulk-nudge", zValidator("json", BulkNudgeBody), async (c) => {
   const auth = c.var.staffAuth;
   const body = c.req.valid("json");
 
-  // Filter to caseIds that belong to the workspace; silently drop the rest
-  // so a partial payload doesn't 404 the whole batch.
+  // Fetch the same joined shape the per-case handler uses, filtered
+  // to caseIds that actually belong to this workspace. Unknown caseIds
+  // are silently dropped so a partial payload doesn't 404 the batch.
   const targets = await withTenancy(c.var.tenancy, async (tx) => {
-    const rows = await tx.select({ id: schema.cases.id }).from(schema.cases);
-    const inSet = new Set(body.caseIds);
-    return rows.map((r) => r.id).filter((id) => inSet.has(id));
+    const rows = await tx
+      .select({
+        caseId: schema.cases.id,
+        providerEmail: schema.providers.email,
+        providerPhone: schema.providers.phone,
+        providerFirstName: schema.providers.firstName,
+        workspaceName: schema.workspaces.name,
+      })
+      .from(schema.cases)
+      .innerJoin(schema.providers, eq(schema.providers.id, schema.cases.providerId))
+      .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.cases.workspaceId))
+      .where(inArray(schema.cases.id, body.caseIds));
+    return rows;
   });
+
+  const perCase: Array<{
+    caseId: string;
+    emailSent: boolean;
+    smsSent: boolean;
+    skipped: string[];
+  }> = [];
+  let emailSent = 0;
+  let smsSent = 0;
+  const skipped: Record<string, number> = {};
+
+  for (const target of targets) {
+    const message =
+      body.message ?? defaultNudgeBody(target.providerFirstName, target.workspaceName);
+    const outcome = await deliverNudge({
+      channel: body.channel,
+      body: message,
+      provider: { email: target.providerEmail, phone: target.providerPhone },
+      workspaceName: target.workspaceName,
+    });
+    perCase.push({
+      caseId: target.caseId,
+      emailSent: outcome.emailSent,
+      smsSent: outcome.smsSent,
+      skipped: outcome.skipped,
+    });
+    if (outcome.emailSent) emailSent += 1;
+    if (outcome.smsSent) smsSent += 1;
+    for (const reason of outcome.skipped) {
+      skipped[reason] = (skipped[reason] ?? 0) + 1;
+    }
+  }
 
   await audit({
     workspaceId: c.var.tenancy.workspaceId,
@@ -765,12 +813,26 @@ cockpitCaseRoutes.post("/v1/cockpit/bulk-nudge", zValidator("json", BulkNudgeBod
     actorType: "user",
     action: "case.bulk_nudge_sent",
     targetEntityType: "case",
-    targetEntityId: targets[0] ?? "00000000-0000-0000-0000-000000000000",
-    after: { requestedCount: body.caseIds.length, dispatchedCount: targets.length },
+    targetEntityId: targets[0]?.caseId ?? "00000000-0000-0000-0000-000000000000",
+    after: {
+      channel: body.channel,
+      requestedCount: body.caseIds.length,
+      dispatchedCount: targets.length,
+      emailSent,
+      smsSent,
+      skipped,
+    },
     requestId: c.var.requestId,
   });
 
-  return new Response(null, { status: 204 });
+  return c.json({
+    requestedCount: body.caseIds.length,
+    dispatchedCount: targets.length,
+    emailSent,
+    smsSent,
+    skipped,
+    perCase,
+  });
 });
 
 // ─── GET /v1/cockpit/cases/new/lookups ────────────────────────────────────
