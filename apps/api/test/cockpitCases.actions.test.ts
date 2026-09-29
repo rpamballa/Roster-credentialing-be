@@ -15,6 +15,9 @@ const { buildApp } = await import("../src/app.js");
 const { createSession, closeSessionStore } = await import("@cred/auth");
 const { db, schema, closeDb } = await import("@cred/db");
 const { eq, and } = await import("drizzle-orm");
+const { capturedEmails, capturedSms, capturedTickets, resetDeliverySpies } = await import(
+  "./support/deliverySpies.js"
+);
 
 const EMPTY_REQS = {
   required_documents: [],
@@ -42,6 +45,7 @@ describe("cockpit case actions — non-state-machine mutations", () => {
   });
   beforeEach(async () => {
     await truncateAll(process.env.DATABASE_URL ?? "");
+    resetDeliverySpies();
   });
   afterAll(async () => {
     await closeDb();
@@ -261,21 +265,47 @@ describe("cockpit case actions — non-state-machine mutations", () => {
 
   // ─── POST /v1/cockpit/cases/:id/nudge ──────────────────────────────────
   describe("POST /v1/cockpit/cases/:id/nudge", () => {
-    it("audit-only 204, no status change", async () => {
+    it("email channel: sendEmail is called with the provider address (real transport assertion)", async () => {
       const s = await seed();
+      // Give the seeded provider an email address so delivery has a
+      // recipient.
+      await db()
+        .update(schema.providers)
+        .set({ email: "provider@example.com" })
+        .where(eq(schema.providers.id, s.providerId));
+
       const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/nudge`, s.sid, {
         channel: "email",
         message: "Reminder!",
       });
       expect(res.status).toBe(204);
-      const [row] = await db()
-        .select({ status: schema.cases.status })
-        .from(schema.cases)
-        .where(eq(schema.cases.id, s.caseId));
-      expect(row?.status).toBe("awaiting_provider");
 
-      const audits = await db()
-        .select({ action: schema.auditLog.action })
+      // Real assertion — the sendEmail mock in setupMocks.ts captures
+      // every call. If the handler stopped at the audit row (the old
+      // dead-code shape), this array would be empty.
+      expect(capturedEmails).toHaveLength(1);
+      expect(capturedEmails[0]?.to).toBe("provider@example.com");
+      expect(capturedEmails[0]?.text).toContain("Reminder!");
+      expect(capturedSms).toHaveLength(0);
+    });
+
+    it("email channel: no provider email → sendEmail is NOT called and audit records the skip", async () => {
+      const s = await seed();
+      // seed() creates provider with email 'p@a.example' — wipe it.
+      await db()
+        .update(schema.providers)
+        .set({ email: null })
+        .where(eq(schema.providers.id, s.providerId));
+      const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/nudge`, s.sid, {
+        channel: "email",
+        message: "x",
+      });
+      expect(res.status).toBe(204);
+
+      expect(capturedEmails).toHaveLength(0);
+
+      const [row] = await db()
+        .select({ afterState: schema.auditLog.afterState })
         .from(schema.auditLog)
         .where(
           and(
@@ -283,7 +313,29 @@ describe("cockpit case actions — non-state-machine mutations", () => {
             eq(schema.auditLog.action, "case.nudge_sent"),
           ),
         );
-      expect(audits).toHaveLength(1);
+      expect(row?.afterState).toMatchObject({
+        channel: "email",
+        emailSent: false,
+        skipped: ["email:no_recipient"],
+      });
+    });
+
+    it("sms_and_email: sendEmail AND sendSms are both invoked with the provider contacts", async () => {
+      const s = await seed();
+      await db()
+        .update(schema.providers)
+        .set({ email: "provider@example.com", phone: "+15551234567" })
+        .where(eq(schema.providers.id, s.providerId));
+      await call("POST", `/v1/cockpit/cases/${s.caseId}/nudge`, s.sid, {
+        channel: "sms_and_email",
+        message: "both channels",
+      });
+
+      expect(capturedEmails).toHaveLength(1);
+      expect(capturedEmails[0]?.to).toBe("provider@example.com");
+      expect(capturedSms).toHaveLength(1);
+      expect(capturedSms[0]?.to).toBe("+15551234567");
+      expect(capturedSms[0]?.body).toContain("both channels");
     });
 
     it("invalid channel → 400", async () => {
@@ -334,6 +386,225 @@ describe("cockpit case actions — non-state-machine mutations", () => {
       const bulkRow = audits.find((a) => a.action === "case.bulk_nudge_sent");
       expect(bulkRow).toBeTruthy();
       expect(bulkRow?.afterState).toMatchObject({ requestedCount: 2, dispatchedCount: 2 });
+    });
+  });
+
+  // ─── POST /v1/cockpit/cases/:id/escalate ────────────────────────────
+  describe("POST /v1/cockpit/cases/:id/escalate", () => {
+    it("fans out a support ticket to notifySupportTicket (Slack + Sheet)", async () => {
+      const s = await seed();
+      const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/escalate`, s.sid, {
+        reason: "facility_mismatch",
+        details: "Facility requires MD but provider is DO — need policy call.",
+      });
+      expect(res.status).toBe(204);
+
+      // Real assertion — the handler used to only audit. Now the
+      // notifySupportTicket mock in setupMocks.ts records what would
+      // have gone to Slack.
+      expect(capturedTickets).toHaveLength(1);
+      expect(capturedTickets[0]).toMatchObject({
+        severity: "bug",
+        caseId: s.caseId,
+        subject: expect.stringContaining("facility_mismatch"),
+        body: expect.stringContaining("Facility requires MD"),
+      });
+      expect(capturedTickets[0]?.workspace).toBe("Agency");
+      expect(capturedTickets[0]?.userEmail).toBe("s1@a.example");
+
+      // Audit row also references the ticketId so the two records
+      // can be joined post-hoc.
+      const [row] = await db()
+        .select({ afterState: schema.auditLog.afterState })
+        .from(schema.auditLog)
+        .where(
+          and(
+            eq(schema.auditLog.targetEntityId, s.caseId),
+            eq(schema.auditLog.action, "case.escalated"),
+          ),
+        );
+      expect(row?.afterState).toMatchObject({
+        reason: "facility_mismatch",
+        ticketId: expect.stringMatching(/^esc_/),
+      });
+    });
+
+    it("bad reason enum → 400 and no ticket sent", async () => {
+      const s = await seed();
+      const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/escalate`, s.sid, {
+        reason: "aliens",
+        details: "beep boop",
+      });
+      expect(res.status).toBe(400);
+      expect(capturedTickets).toHaveLength(0);
+    });
+
+    it("missing details → 400 (required by zod)", async () => {
+      const s = await seed();
+      const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/escalate`, s.sid, {
+        reason: "other",
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  // ─── POST /v1/cockpit/cases/:id/request-reupload ────────────────────
+  describe("POST /v1/cockpit/cases/:id/request-reupload", () => {
+    it("emails + SMS the provider when both contacts exist", async () => {
+      const s = await seed();
+      await db()
+        .update(schema.providers)
+        .set({ email: "provider@example.com", phone: "+15550001111" })
+        .where(eq(schema.providers.id, s.providerId));
+
+      const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/request-reupload`, s.sid, {
+        requirementKey: "state_license.CA",
+        reason: "The scan on file is expired; upload the current one.",
+      });
+      expect(res.status).toBe(204);
+
+      expect(capturedEmails).toHaveLength(1);
+      expect(capturedEmails[0]?.to).toBe("provider@example.com");
+      expect(capturedEmails[0]?.subject).toContain("state_license.CA");
+      expect(capturedEmails[0]?.text).toContain("The scan on file is expired");
+
+      expect(capturedSms).toHaveLength(1);
+      expect(capturedSms[0]?.to).toBe("+15550001111");
+      expect(capturedSms[0]?.body).toContain("state_license.CA");
+
+      const [row] = await db()
+        .select({ afterState: schema.auditLog.afterState })
+        .from(schema.auditLog)
+        .where(
+          and(
+            eq(schema.auditLog.targetEntityId, s.caseId),
+            eq(schema.auditLog.action, "case.reupload_requested"),
+          ),
+        );
+      expect(row?.afterState).toMatchObject({
+        requirementKey: "state_license.CA",
+        emailSent: true,
+        smsSent: true,
+      });
+    });
+
+    it("no email + no phone on provider → skips both, audit records the reasons", async () => {
+      const s = await seed();
+      await db()
+        .update(schema.providers)
+        .set({ email: null, phone: null })
+        .where(eq(schema.providers.id, s.providerId));
+
+      const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/request-reupload`, s.sid, {
+        requirementKey: "attestation.opioid_stewardship",
+        reason: "Missing.",
+      });
+      expect(res.status).toBe(204);
+      expect(capturedEmails).toHaveLength(0);
+      expect(capturedSms).toHaveLength(0);
+
+      const [row] = await db()
+        .select({ afterState: schema.auditLog.afterState })
+        .from(schema.auditLog)
+        .where(
+          and(
+            eq(schema.auditLog.targetEntityId, s.caseId),
+            eq(schema.auditLog.action, "case.reupload_requested"),
+          ),
+        );
+      expect(row?.afterState).toMatchObject({
+        emailSent: false,
+        smsSent: false,
+        skipped: ["no_email_recipient", "no_sms_recipient"],
+      });
+    });
+
+    it("unknown case → 404, no email sent", async () => {
+      const s = await seed();
+      const res = await call(
+        "POST",
+        `/v1/cockpit/cases/00000000-0000-0000-0000-000000000000/request-reupload`,
+        s.sid,
+        { requirementKey: "x", reason: "y" },
+      );
+      expect(res.status).toBe(404);
+      expect(capturedEmails).toHaveLength(0);
+    });
+  });
+
+  // ─── POST /v1/cockpit/cases/:id/references/:refId/resend ─────────────
+  describe("POST /v1/cockpit/cases/:caseId/references/:refId/resend", () => {
+    async function seedReference(s: Seed, email: string | null): Promise<{ referenceId: string }> {
+      const [ref] = await db()
+        .insert(schema.references)
+        .values({
+          workspaceId: s.workspaceId,
+          caseId: s.caseId,
+          name: "Referee Jones",
+          relationship: "peer_physician",
+          email,
+          status: "sent",
+        })
+        .returning({ id: schema.references.id });
+      return { referenceId: ref!.id };
+    }
+
+    it("reference has email → sendEmail called with the /reference/${token} URL", async () => {
+      const s = await seed();
+      const { referenceId } = await seedReference(s, "referee@example.com");
+
+      const res = await call(
+        "POST",
+        `/v1/cockpit/cases/${s.caseId}/references/${referenceId}/resend`,
+        s.sid,
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { url: string; emailSent: boolean };
+      expect(body.url).toMatch(/\/reference\/[A-Za-z0-9_-]+/);
+      expect(body.emailSent).toBe(true);
+
+      expect(capturedEmails).toHaveLength(1);
+      expect(capturedEmails[0]?.to).toBe("referee@example.com");
+      expect(capturedEmails[0]?.text).toContain(body.url);
+    });
+
+    it("reference has no email → sendEmail NOT called, audit records no_recipient", async () => {
+      const s = await seed();
+      const { referenceId } = await seedReference(s, null);
+      const res = await call(
+        "POST",
+        `/v1/cockpit/cases/${s.caseId}/references/${referenceId}/resend`,
+        s.sid,
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { emailSent: boolean };
+      expect(body.emailSent).toBe(false);
+      expect(capturedEmails).toHaveLength(0);
+
+      const [row] = await db()
+        .select({ afterState: schema.auditLog.afterState })
+        .from(schema.auditLog)
+        .where(
+          and(
+            eq(schema.auditLog.targetEntityId, referenceId),
+            eq(schema.auditLog.action, "reference.resent"),
+          ),
+        );
+      expect(row?.afterState).toMatchObject({
+        emailSent: false,
+        emailSkipReason: "no_recipient",
+      });
+    });
+
+    it("unknown reference → 404, no email", async () => {
+      const s = await seed();
+      const res = await call(
+        "POST",
+        `/v1/cockpit/cases/${s.caseId}/references/00000000-0000-0000-0000-000000000000/resend`,
+        s.sid,
+      );
+      expect(res.status).toBe(404);
+      expect(capturedEmails).toHaveLength(0);
     });
   });
 
