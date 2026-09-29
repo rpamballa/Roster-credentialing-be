@@ -18,6 +18,7 @@ const { createSession, closeSessionStore } = await import("@cred/auth");
 const { db, schema, closeDb } = await import("@cred/db");
 const { eq, and } = await import("drizzle-orm");
 const { getObjectStorage } = await import("@cred/storage");
+const { capturedEmails, resetDeliverySpies } = await import("./support/deliverySpies.js");
 
 const EMPTY_REQS = {
   required_documents: [],
@@ -44,6 +45,7 @@ describe("/v1/cases/:caseId/documents/* and references", () => {
   });
   beforeEach(async () => {
     await truncateAll(process.env.DATABASE_URL ?? "");
+    resetDeliverySpies();
   });
   afterAll(async () => {
     await closeDb();
@@ -384,17 +386,26 @@ describe("/v1/cases/:caseId/documents/* and references", () => {
       expect(res.status).toBe(404);
     });
 
-    it("audit row written on POST", async () => {
+    it("POST with email → sendEmail invoked with the reference URL, audit records emailSent=true", async () => {
       const s = await seed();
       const res = await call("POST", `/v1/cases/${s.caseId}/references`, s.sid, {
-        fullName: "R",
+        fullName: "Dr. Reference Person",
         email: "r@example.com",
         organization: "Org",
         relationship: "training_director",
       });
       const created = (await res.json()) as { id: string };
-      const audits = await db()
-        .select({ action: schema.auditLog.action })
+
+      // Real assertion — the invite button used to only write an
+      // audit row without emailing. Now the mock records the actual
+      // outbound call.
+      expect(capturedEmails).toHaveLength(1);
+      expect(capturedEmails[0]?.to).toBe("r@example.com");
+      expect(capturedEmails[0]?.text).toMatch(/\/reference\/[A-Za-z0-9_-]+/);
+      expect(capturedEmails[0]?.text).toContain("Dr. Reference Person");
+
+      const [audit] = await db()
+        .select({ action: schema.auditLog.action, afterState: schema.auditLog.afterState })
         .from(schema.auditLog)
         .where(
           and(
@@ -402,7 +413,18 @@ describe("/v1/cases/:caseId/documents/* and references", () => {
             eq(schema.auditLog.action, "reference.invited"),
           ),
         );
-      expect(audits).toHaveLength(1);
+      expect(audit?.afterState).toMatchObject({ emailSent: true, emailSkipReason: null });
+    });
+
+    it("POST without email → 400 (zod requires email)", async () => {
+      const s = await seed();
+      const res = await call("POST", `/v1/cases/${s.caseId}/references`, s.sid, {
+        fullName: "Emailless Peer",
+        organization: "Org",
+        relationship: "peer_physician",
+      });
+      expect(res.status).toBe(400);
+      expect(capturedEmails).toHaveLength(0);
     });
   });
 

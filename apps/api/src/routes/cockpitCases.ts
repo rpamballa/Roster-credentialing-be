@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { issueCaseAccessToken, issueReferenceToken, sendEmail, sendSms } from "@cred/auth";
 import { env } from "@cred/config";
 import { schema, withTenancy } from "@cred/db";
@@ -10,6 +11,7 @@ import { requireWriterOnMutations } from "../middleware/rbac.js";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
 import { recordCaseStatusEvent } from "../services/caseStatusEvents.js";
+import { notifySupportTicket } from "../services/notifySupportTicket.js";
 import type { ApiBindings } from "../types.js";
 
 function notFoundResponse(c: Context<ApiBindings>): Response {
@@ -372,15 +374,48 @@ cockpitCaseRoutes.post(
     const caseId = c.req.param("caseId");
     const body = c.req.valid("json");
 
-    const exists = await withTenancy(c.var.tenancy, async (tx) => {
+    // Fetch enough context to compose an actionable Slack post — case
+    // exists, plus the actor's identity + workspace name for the
+    // ticket header.
+    const ctx = await withTenancy(c.var.tenancy, async (tx) => {
       const [row] = await tx
-        .select({ id: schema.cases.id })
+        .select({
+          caseId: schema.cases.id,
+          workspaceName: schema.workspaces.name,
+          actorEmail: schema.users.email,
+          actorRole: schema.memberships.role,
+        })
         .from(schema.cases)
+        .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.cases.workspaceId))
+        .leftJoin(schema.users, eq(schema.users.id, auth.session.userId))
+        .leftJoin(
+          schema.memberships,
+          and(
+            eq(schema.memberships.userId, auth.session.userId),
+            eq(schema.memberships.workspaceId, c.var.tenancy.workspaceId),
+          ),
+        )
         .where(eq(schema.cases.id, caseId))
         .limit(1);
-      return Boolean(row);
+      return row ?? null;
     });
-    if (!exists) return notFoundResponse(c);
+    if (!ctx) return notFoundResponse(c);
+
+    // Fan out to Slack (via the existing SLACK_WEBHOOK_URL used by
+    // support tickets). No-op when the webhook isn't configured; the
+    // audit row is still the source of truth so nothing is lost.
+    const ticketId = `esc_${randomUUID().slice(0, 8)}`;
+    void notifySupportTicket({
+      ticketId,
+      receivedAt: new Date().toISOString(),
+      workspace: ctx.workspaceName,
+      userEmail: ctx.actorEmail ?? "(unknown)",
+      role: ctx.actorRole ?? "(unknown)",
+      severity: "bug",
+      subject: `Case escalation: ${body.reason}`,
+      body: body.details,
+      caseId,
+    }).catch((err) => logger.warn({ err, ticketId }, "escalate_slack_notify_failed"));
 
     await audit({
       workspaceId: c.var.tenancy.workspaceId,
@@ -389,7 +424,7 @@ cockpitCaseRoutes.post(
       action: "case.escalated",
       targetEntityType: "case",
       targetEntityId: caseId,
-      after: { reason: body.reason },
+      after: { reason: body.reason, ticketId },
       requestId: c.var.requestId,
     });
 
@@ -410,15 +445,63 @@ cockpitCaseRoutes.post(
     const caseId = c.req.param("caseId");
     const body = c.req.valid("json");
 
-    const exists = await withTenancy(c.var.tenancy, async (tx) => {
+    // Join to provider contact + workspace so we can email/SMS the
+    // provider with the specialist's requirement note and a link back
+    // to the welcome page (where they pick this case).
+    const ctx = await withTenancy(c.var.tenancy, async (tx) => {
       const [row] = await tx
-        .select({ id: schema.cases.id })
+        .select({
+          caseId: schema.cases.id,
+          providerFirstName: schema.providers.firstName,
+          providerEmail: schema.providers.email,
+          providerPhone: schema.providers.phone,
+          workspaceName: schema.workspaces.name,
+        })
         .from(schema.cases)
+        .innerJoin(schema.providers, eq(schema.providers.id, schema.cases.providerId))
+        .innerJoin(schema.workspaces, eq(schema.workspaces.id, schema.cases.workspaceId))
         .where(eq(schema.cases.id, caseId))
         .limit(1);
-      return Boolean(row);
+      return row ?? null;
     });
-    if (!exists) return notFoundResponse(c);
+    if (!ctx) return notFoundResponse(c);
+
+    const hi = ctx.providerFirstName ? `Hi ${ctx.providerFirstName},` : "Hi there,";
+    const welcomeUrl = `${env().WEB_PUBLIC_URL}/welcome`;
+    const emailBody = `${hi}\n\n${ctx.workspaceName} needs a fresh copy of *${body.requirementKey}* on your credentialing packet.\n\nReason from the credentialing team:\n${body.reason}\n\nSign in at ${welcomeUrl} to upload the new document.\n\nThanks!`;
+    const smsBody = `${ctx.workspaceName}: please re-upload "${body.requirementKey}" — ${body.reason.slice(0, 120)}${body.reason.length > 120 ? "…" : ""}. Sign in: ${welcomeUrl}`;
+
+    let emailSent = false;
+    let smsSent = false;
+    const skipped: string[] = [];
+
+    if (ctx.providerEmail) {
+      try {
+        await sendEmail({
+          to: ctx.providerEmail,
+          subject: `Action needed: re-upload ${body.requirementKey}`,
+          text: emailBody,
+        });
+        emailSent = true;
+      } catch (err) {
+        logger.warn({ err, caseId }, "reupload_email_failed");
+        skipped.push("email_failed");
+      }
+    } else {
+      skipped.push("no_email_recipient");
+    }
+
+    if (ctx.providerPhone) {
+      try {
+        await sendSms({ to: ctx.providerPhone, body: smsBody });
+        smsSent = true;
+      } catch (err) {
+        logger.warn({ err, caseId }, "reupload_sms_failed");
+        skipped.push("sms_failed");
+      }
+    } else {
+      skipped.push("no_sms_recipient");
+    }
 
     await audit({
       workspaceId: c.var.tenancy.workspaceId,
@@ -427,7 +510,7 @@ cockpitCaseRoutes.post(
       action: "case.reupload_requested",
       targetEntityType: "case",
       targetEntityId: caseId,
-      after: { requirementKey: body.requirementKey },
+      after: { requirementKey: body.requirementKey, emailSent, smsSent, skipped },
       requestId: c.var.requestId,
     });
 
@@ -466,6 +549,29 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/references/:referenceId/resend
   });
   const url = new URL(`/reference/${token}`, env().WEB_PUBLIC_URL).toString();
 
+  // Actually deliver the resend — the whole point of the button. Falls
+  // back to a "no recipient" audit note if the reference row has no
+  // email on file (rare — the intake form requires one — but possible
+  // for legacy rows).
+  let emailSent = false;
+  let emailSkipReason: string | null = null;
+  if (!detail.email) {
+    emailSkipReason = "no_recipient";
+  } else {
+    try {
+      const firstName = detail.name?.split(/\s+/)[0] ?? "there";
+      await sendEmail({
+        to: detail.email,
+        subject: "Reference request — reminder",
+        text: `Hi ${firstName},\n\nJust a reminder that we still need your reference for a provider you were listed for.\n\nComplete the short form here: ${url}\n\nThe link expires ${expiresAt.toISOString().slice(0, 10)}.\n\nThank you!`,
+      });
+      emailSent = true;
+    } catch (err) {
+      logger.warn({ err, referenceId }, "reference_resend_email_failed");
+      emailSkipReason = "email_failed";
+    }
+  }
+
   await audit({
     workspaceId: c.var.tenancy.workspaceId,
     actorUserId: auth.session.userId,
@@ -473,7 +579,7 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/references/:referenceId/resend
     action: "reference.resent",
     targetEntityType: "reference",
     targetEntityId: referenceId,
-    after: { caseId, url, expiresAt: expiresAt.toISOString() },
+    after: { caseId, url, expiresAt: expiresAt.toISOString(), emailSent, emailSkipReason },
     requestId: c.var.requestId,
   });
   // Watcher-shaped log line so scripts/magic-link-watch.sh surfaces the URL.
@@ -488,7 +594,7 @@ cockpitCaseRoutes.post("/v1/cockpit/cases/:caseId/references/:referenceId/resend
     "reference_magic_link_issued",
   );
 
-  return c.json({ url, expiresAt: expiresAt.toISOString() });
+  return c.json({ url, expiresAt: expiresAt.toISOString(), emailSent });
 });
 
 // ─── POST /v1/cockpit/cases/:caseId/invite-provider ───────────────────

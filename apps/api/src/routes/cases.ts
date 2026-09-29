@@ -12,8 +12,10 @@
 // path `:caseId` to that session.
 
 import { randomUUID } from "node:crypto";
+import { issueReferenceToken, sendEmail } from "@cred/auth";
+import { env } from "@cred/config";
 import { db, schema, withTenancy } from "@cred/db";
-import { audit } from "@cred/observability";
+import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import type { FacilityRequirements } from "@cred/types";
 import type {
@@ -917,6 +919,46 @@ caseRoutes.post(
       );
     }
 
+    // Mint a single-use reference token + email the reference form
+    // link. Ships the reference from "row inserted" (which is where
+    // this endpoint used to stop — the reference never heard anything
+    // and the card showed 'Pending' forever) to actually contacted.
+    // `email` is required by the zod schema above, so the only skip
+    // reason at this layer is a downstream failure.
+    const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+    let emailSent = false;
+    let emailSkipReason: string | null = null;
+    try {
+      const { token } = await issueReferenceToken({
+        referenceId: inserted.id,
+        workspaceId: tenancy.workspaceId,
+        expiresAt,
+      });
+      const url = new URL(`/reference/${token}`, env().WEB_PUBLIC_URL).toString();
+      const firstName = body.fullName.split(/\s+/)[0] ?? "there";
+      await sendEmail({
+        to: body.email,
+        subject: `Reference request for ${firstName}`,
+        text: `Hi ${firstName},\n\n${body.fullName} listed you as a reference for their hospital credentialing packet. It's a short form — a few yes/no questions plus space for anything else you'd like us to know.\n\nOpen the form: ${url}\n\nThis link expires in 14 days. If you have questions, reply to this email.\n\n— Roster Healthcare`,
+      });
+      emailSent = true;
+      // Watcher-shaped log so scripts/magic-link-watch.sh surfaces it
+      // in dev.
+      logger.info(
+        {
+          action: "reference.magic_link.issued",
+          caseId,
+          referenceId: inserted.id,
+          email: body.email,
+          url,
+        },
+        "reference_magic_link_issued",
+      );
+    } catch (err) {
+      logger.warn({ err, referenceId: inserted.id }, "reference_invite_email_failed");
+      emailSkipReason = "failed";
+    }
+
     await audit({
       workspaceId: tenancy.workspaceId,
       actorUserId: null,
@@ -924,7 +966,13 @@ caseRoutes.post(
       action: "reference.invited",
       targetEntityType: "reference",
       targetEntityId: inserted.id,
-      after: { caseId, organization: body.organization, relationship: body.relationship },
+      after: {
+        caseId,
+        organization: body.organization,
+        relationship: body.relationship,
+        emailSent,
+        emailSkipReason,
+      },
       requestId: c.var.requestId,
     });
 
