@@ -50,6 +50,8 @@ jobs:
       NODE_ENV: test
       API_PUBLIC_URL: http://localhost:3001
       WEB_PUBLIC_URL: http://localhost:3000
+      STORAGE_EMULATOR_HOST: http://localhost:4443
+      GCS_BUCKET: cred-dev
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -60,9 +62,24 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # fake-gcs-server for object-storage integration tests. Runs as
+      # a bare docker container rather than a GitHub Actions service
+      # because we need to pass `-scheme http` at the process level
+      # (services can't customize entrypoint args cleanly), and the
+      # SDK can't reach the emulator's self-signed HTTPS.
+      - name: Start fake-gcs + create cred-dev bucket
+        run: |
+          docker run -d --rm --name fake-gcs -p 4443:4443 \
+            fsouza/fake-gcs-server:1.49.3 -scheme http
+          for i in {1..15}; do
+            curl -sSf -X POST 'http://localhost:4443/storage/v1/b?project=cred-test' \
+              -H 'Content-Type: application/json' \
+              -d '{"name":"cred-dev"}' && break
+            echo "waiting for fake-gcs..."; sleep 2
+          done
       - name: Typecheck
         run: pnpm typecheck
       - name: Biome (lint + format check)
         run: pnpm exec biome check
-      - name: Vitest — integration tests hit real Postgres + Redis via services
+      - name: Vitest — integration tests hit real Postgres + Redis + fake-gcs via services
         run: pnpm --filter @cred/api test
