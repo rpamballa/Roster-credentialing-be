@@ -28,6 +28,8 @@ export async function truncateAll(url: string): Promise<void> {
         audit_log,
         magic_link_tokens,
         password_reset_tokens,
+        marketing_leads,
+        inbound_emails,
         case_notes,
         case_status_events,
         case_access_tokens,

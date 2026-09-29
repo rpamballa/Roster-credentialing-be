@@ -127,16 +127,16 @@ webhookRoutes.post(
 
 async function directPut(key: string, body: Buffer, contentType: string): Promise<void> {
   // The object-storage adapter only exposes signed URLs publicly. For
-  // server-internal writes we go through the same presign path and PUT
-  // to it — keeps a single code path for object writes regardless of
-  // whether the emulator or real GCS is behind it.
+  // server-internal writes we go through the same presign path and use
+  // whatever method the adapter said to — prod GCS wants PUT (v4-signed
+  // XML), the fake-gcs-server emulator wants POST to a different route.
   const presign = await getObjectStorage().putSignedUrl({
     key,
     contentType,
     expiresInSeconds: 120,
   });
   const resp = await fetch(presign.url, {
-    method: "PUT",
+    method: presign.method,
     headers: { "content-type": contentType, ...presign.headers },
     body,
   });
