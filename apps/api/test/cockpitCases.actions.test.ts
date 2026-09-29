@@ -349,12 +349,26 @@ describe("cockpit case actions — non-state-machine mutations", () => {
 
   // ─── POST /v1/cockpit/bulk-nudge ───────────────────────────────────────
   describe("POST /v1/cockpit/bulk-nudge", () => {
-    it("emits one audit row per caseId, 200 with count", async () => {
+    async function twoCaseSetup(): Promise<{
+      s: Seed;
+      cs2Id: string;
+    }> {
       const s = await seed();
-      // Two more cases so we can nudge in bulk.
+      // Give the seeded provider full contact details.
+      await db()
+        .update(schema.providers)
+        .set({ email: "provider@example.com", phone: "+15550001111" })
+        .where(eq(schema.providers.id, s.providerId));
+      // Add a second provider + case in the same workspace.
       const [p2] = await db()
         .insert(schema.providers)
-        .values({ email: "p2@a.example", firstName: "B", lastName: "C", userId: null })
+        .values({
+          email: "p2@example.com",
+          phone: "+15550002222",
+          firstName: "B",
+          lastName: "C",
+          userId: null,
+        })
         .returning({ id: schema.providers.id });
       await db()
         .insert(schema.providerWorkspaceGrants)
@@ -371,21 +385,105 @@ describe("cockpit case actions — non-state-machine mutations", () => {
           status: "awaiting_provider",
         })
         .returning({ id: schema.cases.id });
+      return { s, cs2Id: cs2!.id };
+    }
+
+    it("fans out sendEmail + sendSms per targeted case", async () => {
+      const { s, cs2Id } = await twoCaseSetup();
 
       const res = await call("POST", "/v1/cockpit/bulk-nudge", s.sid, {
-        caseIds: [s.caseId, cs2!.id],
+        caseIds: [s.caseId, cs2Id],
         message: "bulk!",
+        channel: "sms_and_email",
       });
-      expect(res.status).toBe(204);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        requestedCount: number;
+        dispatchedCount: number;
+        emailSent: number;
+        smsSent: number;
+        perCase: Array<{ caseId: string; emailSent: boolean; smsSent: boolean }>;
+      };
+      expect(body).toMatchObject({
+        requestedCount: 2,
+        dispatchedCount: 2,
+        emailSent: 2,
+        smsSent: 2,
+      });
+      expect(body.perCase).toHaveLength(2);
+      expect(body.perCase.every((p) => p.emailSent && p.smsSent)).toBe(true);
 
-      // Emits ONE case.bulk_nudge_sent audit row with dispatchedCount=2,
-      // not one per case.
+      // Real transport-boundary assertion — 2 emails + 2 SMS actually
+      // captured, not just audit rows claiming so.
+      expect(capturedEmails).toHaveLength(2);
+      expect(capturedSms).toHaveLength(2);
+      const emailRecipients = capturedEmails.map((e) => e.to).sort();
+      expect(emailRecipients).toEqual(["p2@example.com", "provider@example.com"]);
+      expect(capturedEmails.every((e) => e.text.includes("bulk!"))).toBe(true);
+    });
+
+    it("channel=email only fires email, not sms", async () => {
+      const { s, cs2Id } = await twoCaseSetup();
+      await call("POST", "/v1/cockpit/bulk-nudge", s.sid, {
+        caseIds: [s.caseId, cs2Id],
+        channel: "email",
+      });
+      expect(capturedEmails).toHaveLength(2);
+      expect(capturedSms).toHaveLength(0);
+    });
+
+    it("unknown caseIds silently dropped; batch dispatches only the workspace-scoped ones", async () => {
+      const { s, cs2Id } = await twoCaseSetup();
+      const res = await call("POST", "/v1/cockpit/bulk-nudge", s.sid, {
+        caseIds: [s.caseId, cs2Id, "00000000-0000-0000-0000-000000000000"],
+        channel: "email",
+      });
+      const body = (await res.json()) as { requestedCount: number; dispatchedCount: number };
+      expect(body).toMatchObject({ requestedCount: 3, dispatchedCount: 2 });
+      expect(capturedEmails).toHaveLength(2);
+    });
+
+    it("provider missing phone → email still fires, SMS records skip", async () => {
+      const { s, cs2Id } = await twoCaseSetup();
+      // Wipe phone on provider #1; keep the email.
+      await db()
+        .update(schema.providers)
+        .set({ phone: null })
+        .where(eq(schema.providers.id, s.providerId));
+
+      const res = await call("POST", "/v1/cockpit/bulk-nudge", s.sid, {
+        caseIds: [s.caseId, cs2Id],
+        channel: "sms_and_email",
+      });
+      const body = (await res.json()) as {
+        emailSent: number;
+        smsSent: number;
+        skipped: Record<string, number>;
+      };
+      expect(body.emailSent).toBe(2);
+      expect(body.smsSent).toBe(1);
+      expect(body.skipped["sms:no_recipient"]).toBe(1);
+      expect(capturedEmails).toHaveLength(2);
+      expect(capturedSms).toHaveLength(1);
+    });
+
+    it("audit row records the aggregate", async () => {
+      const { s, cs2Id } = await twoCaseSetup();
+      await call("POST", "/v1/cockpit/bulk-nudge", s.sid, {
+        caseIds: [s.caseId, cs2Id],
+        channel: "email",
+      });
       const audits = await db()
         .select({ action: schema.auditLog.action, afterState: schema.auditLog.afterState })
         .from(schema.auditLog);
       const bulkRow = audits.find((a) => a.action === "case.bulk_nudge_sent");
-      expect(bulkRow).toBeTruthy();
-      expect(bulkRow?.afterState).toMatchObject({ requestedCount: 2, dispatchedCount: 2 });
+      expect(bulkRow?.afterState).toMatchObject({
+        channel: "email",
+        requestedCount: 2,
+        dispatchedCount: 2,
+        emailSent: 2,
+        smsSent: 0,
+      });
     });
   });
 
