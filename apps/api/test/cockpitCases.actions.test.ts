@@ -261,8 +261,15 @@ describe("cockpit case actions — non-state-machine mutations", () => {
 
   // ─── POST /v1/cockpit/cases/:id/nudge ──────────────────────────────────
   describe("POST /v1/cockpit/cases/:id/nudge", () => {
-    it("audit-only 204, no status change", async () => {
+    it("email channel: audit row records emailSent=true when provider has an email", async () => {
       const s = await seed();
+      // Give the seeded provider an email address so delivery has a
+      // recipient.
+      await db()
+        .update(schema.providers)
+        .set({ email: "provider@example.com" })
+        .where(eq(schema.providers.id, s.providerId));
+
       const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/nudge`, s.sid, {
         channel: "email",
         message: "Reminder!",
@@ -274,8 +281,11 @@ describe("cockpit case actions — non-state-machine mutations", () => {
         .where(eq(schema.cases.id, s.caseId));
       expect(row?.status).toBe("awaiting_provider");
 
+      // Audit row now proves delivery was ATTEMPTED and marked as sent
+      // (sendEmail dev-logs and returns cleanly in test env, so the
+      // handler flips emailSent=true).
       const audits = await db()
-        .select({ action: schema.auditLog.action })
+        .select({ action: schema.auditLog.action, afterState: schema.auditLog.afterState })
         .from(schema.auditLog)
         .where(
           and(
@@ -284,6 +294,64 @@ describe("cockpit case actions — non-state-machine mutations", () => {
           ),
         );
       expect(audits).toHaveLength(1);
+      expect(audits[0]?.afterState).toMatchObject({
+        channel: "email",
+        emailSent: true,
+      });
+    });
+
+    it("email channel: no provider email → emailSent=false + skipped records why", async () => {
+      const s = await seed();
+      // seed() creates provider with email 'p@a.example' — wipe it.
+      await db()
+        .update(schema.providers)
+        .set({ email: null })
+        .where(eq(schema.providers.id, s.providerId));
+      const res = await call("POST", `/v1/cockpit/cases/${s.caseId}/nudge`, s.sid, {
+        channel: "email",
+        message: "x",
+      });
+      expect(res.status).toBe(204);
+      const [row] = await db()
+        .select({ afterState: schema.auditLog.afterState })
+        .from(schema.auditLog)
+        .where(
+          and(
+            eq(schema.auditLog.targetEntityId, s.caseId),
+            eq(schema.auditLog.action, "case.nudge_sent"),
+          ),
+        );
+      expect(row?.afterState).toMatchObject({
+        channel: "email",
+        emailSent: false,
+        skipped: ["email:no_recipient"],
+      });
+    });
+
+    it("sms_and_email: both fire when both contact fields exist", async () => {
+      const s = await seed();
+      await db()
+        .update(schema.providers)
+        .set({ email: "provider@example.com", phone: "+15551234567" })
+        .where(eq(schema.providers.id, s.providerId));
+      await call("POST", `/v1/cockpit/cases/${s.caseId}/nudge`, s.sid, {
+        channel: "sms_and_email",
+        message: "both channels",
+      });
+      const [row] = await db()
+        .select({ afterState: schema.auditLog.afterState })
+        .from(schema.auditLog)
+        .where(
+          and(
+            eq(schema.auditLog.targetEntityId, s.caseId),
+            eq(schema.auditLog.action, "case.nudge_sent"),
+          ),
+        );
+      expect(row?.afterState).toMatchObject({
+        channel: "sms_and_email",
+        emailSent: true,
+        smsSent: true,
+      });
     });
 
     it("invalid channel → 400", async () => {
