@@ -1,0 +1,93 @@
+# ───────────────────────────────────────────────────────────────────
+# Dockerfile.api — Hono REST + GraphQL backend, plus Temporal worker.
+#
+# Lives in the BE repo (moved here 2026-09-30) so CI can build + push
+# the image without a second checkout. Previously lived in the
+# deploy repo and required the deploy VM to hold a source checkout
+# at ${BE_DIR}.
+#
+# Build context is the BE repo root (the whole monorepo, because
+# apps/api pulls workspace packages from packages/*). The workflow
+# runs `docker build -f deploy/Dockerfile.api .` from the repo root.
+#
+# This image is intentionally dual-purpose: by default it boots the
+# HTTP server, but compose runs a second container off the same image
+# with `command: tsx apps/workers/src/worker.ts` so the Temporal
+# worker stays in lockstep with the api version.
+#
+# Base: `node:24-slim` (Debian, glibc). NOT alpine — the temporal
+# core-bridge native module ships only glibc binaries and crashes
+# with `__register_atfork: symbol not found` against musl.
+# ───────────────────────────────────────────────────────────────────
+FROM node:24-slim AS base
+RUN corepack enable && corepack prepare pnpm@9 --activate
+WORKDIR /app
+
+# ── deps stage ────────────────────────────────────────────────────
+# Copy lockfiles + all package.jsons first, install once, cache hits.
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/api/package.json ./apps/api/
+COPY apps/workers/package.json ./apps/workers/
+COPY packages/ai/package.json ./packages/ai/
+COPY packages/auth/package.json ./packages/auth/
+COPY packages/config/package.json ./packages/config/
+COPY packages/db/package.json ./packages/db/
+COPY packages/observability/package.json ./packages/observability/
+COPY packages/storage/package.json ./packages/storage/
+COPY packages/types/package.json ./packages/types/
+RUN pnpm install --frozen-lockfile
+
+# ── build stage ───────────────────────────────────────────────────
+# We don't tsc-build here: the workspace packages (packages/*) ship as
+# raw TypeScript with `main` pointing at `src/*.ts`. None of them have
+# a `build` script. Rather than bolt one onto every package, we run
+# tsx at runtime — its SWC-based transpile happens once at boot and
+# is negligible (<200ms) for a service that lives for hours.
+FROM base AS build
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN pnpm install --frozen-lockfile --offline
+
+# ── runner stage ──────────────────────────────────────────────────
+# Carries the full monorepo + tsx so api and worker both boot from
+# their src/server.ts entrypoints. Image is ~600 MB — acceptable for
+# this stage (single host, internal traffic only).
+FROM node:24-slim AS runner
+RUN corepack enable && corepack prepare pnpm@9 --activate
+# wget is used by the compose healthcheck; slim doesn't ship it.
+RUN apt-get update && apt-get install -y --no-install-recommends wget \
+  && rm -rf /var/lib/apt/lists/*
+# Install tsx globally so we can boot ts directly with `tsx ...`
+# regardless of CWD. The workspace's local tsx (apps/api/node_modules)
+# is only on the resolve path when CWD is apps/api — keeping that
+# constraint out of the compose command surface is worth ~7 MB.
+RUN npm install -g tsx@4.19.2
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app /app
+
+# ── version metadata ──────────────────────────────────────────────
+# The CI workflow passes GIT_SHA / GIT_REF / BUILT_AT; local builds
+# fall through to "dev" so `docker build .` still works from a
+# developer's laptop without extra args. The routes/health.ts
+# `/version` endpoint reads this file at boot and exposes the values
+# so the deploy workflow can assert `curl /version | jq -r .sha`
+# matches the sha it just pushed.
+ARG GIT_SHA=dev
+ARG GIT_REF=dev
+ARG BUILT_AT=dev
+RUN printf 'sha=%s\nref=%s\nbuiltAt=%s\n' "$GIT_SHA" "$GIT_REF" "$BUILT_AT" > /app/version.txt
+
+# Standard OCI labels — `docker inspect <container> --format \
+# '{{index .Config.Labels "org.opencontainers.image.revision"}}'`
+# is the fallback if the container's /version endpoint isn't
+# reachable (network issue, port closed, etc.).
+LABEL org.opencontainers.image.revision=$GIT_SHA
+LABEL org.opencontainers.image.ref.name=$GIT_REF
+LABEL org.opencontainers.image.created=$BUILT_AT
+LABEL org.opencontainers.image.source="https://github.com/rpamballa/Roster-credentialing-be"
+
+EXPOSE 3001
+# Default: HTTP api. compose overrides for the worker container.
+CMD ["tsx", "apps/api/src/server.ts"]
