@@ -1,0 +1,175 @@
+name: deploy
+
+# Build the API image on every push to main, push it to Artifact
+# Registry, then SSH to roster-prod and roll the api + worker
+# containers over. Verify by asserting /version on prod returns
+# the sha we just pushed.
+#
+# Auth is Workload Identity Federation (no static keys). The WIF
+# pool `github` on the GCP project is bound to this repo via
+# principalSet://.../attribute.repository/rpamballa/Roster-credentialing-be.
+# The github-deployer SA can push to Artifact Registry, tunnel via IAP,
+# and act as the roster-vm SA (needed for gcloud compute ssh).
+
+on:
+  push:
+    branches: [main]
+  # Manual trigger so ops can re-deploy the current main without a
+  # code change (e.g. after a VM restart).
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # required for Workload Identity Federation
+
+env:
+  GCP_PROJECT_ID: project-dc4c2e27-480c-4529-9b4
+  GCP_PROJECT_NUMBER: "92457738586"
+  REGION: us-central1
+  REGISTRY: us-central1-docker.pkg.dev
+  ARTIFACT_REPO: roster
+  IMAGE_NAME: api
+  WIF_PROVIDER: projects/92457738586/locations/global/workloadIdentityPools/github/providers/github
+  WIF_SERVICE_ACCOUNT: github-deployer@project-dc4c2e27-480c-4529-9b4.iam.gserviceaccount.com
+  VM_NAME: roster-prod
+  VM_ZONE: us-central1-a
+  # Where /opt/roster is a git clone of roster-credentialing-deploy
+  # on the VM. The deploy job `git pull`s here to pick up compose.yml
+  # changes before restarting containers.
+  DEPLOY_DIR_ON_VM: /opt/roster
+
+jobs:
+  build:
+    name: build + push image
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        name: compute tags
+        run: |
+          SHA=${GITHUB_SHA::12}
+          IMAGE="${REGISTRY}/${GCP_PROJECT_ID}/${ARTIFACT_REPO}/${IMAGE_NAME}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Tagging as ${IMAGE}:${SHA} + ${IMAGE}:main"
+
+      - id: gcp-auth
+        name: authenticate to gcp (workload identity federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+
+      - name: configure docker for artifact registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./deploy/Dockerfile.api
+          push: true
+          # Only tag amd64 for now — the VM runs Debian x86_64. If
+          # we ever add arm64 hosts, add `linux/arm64` here and the
+          # buildx step will fan out.
+          platforms: linux/amd64
+          build-args: |
+            GIT_SHA=${{ steps.meta.outputs.sha }}
+            GIT_REF=${{ github.ref_name }}
+            BUILT_AT=${{ github.event.head_commit.timestamp }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.sha }}
+            ${{ steps.meta.outputs.image }}:main
+          # Cache the build layers between runs so a small BE change
+          # doesn't re-download node_modules etc. (~5 min → ~1 min).
+          cache-from: type=registry,ref=${{ steps.meta.outputs.image }}:buildcache
+          cache-to: type=registry,ref=${{ steps.meta.outputs.image }}:buildcache,mode=max
+
+  deploy:
+    name: deploy to roster-prod
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: ssh to prod + roll api + worker
+        env:
+          API_TAG: ${{ needs.build.outputs.sha }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          # The remote command is passed via --command so we don't
+          # need an interactive PTY. IAP tunnel means no public IP
+          # exposure. `set -euo pipefail` inside so a failed pull or
+          # restart aborts the whole deploy.
+          #
+          # `API_TAG=${API_TAG}` in front of the compose command
+          # substitutes the value of the sha we just pushed into
+          # compose.yml's `image: ...:${API_TAG:-latest}`.
+          gcloud compute ssh "${VM_NAME}" \
+            --zone="${VM_ZONE}" \
+            --tunnel-through-iap \
+            --quiet \
+            --command="set -euo pipefail
+              cd ${DEPLOY_DIR_ON_VM}
+              echo '── pull latest compose.yml + Dockerfiles ──'
+              sudo -u revanthpamballa git pull --ff-only origin main
+              echo
+              echo '── pull the api image tagged '${API_TAG}' ──'
+              sudo API_TAG=${API_TAG} docker compose pull api worker
+              echo
+              echo '── roll api + worker with the new image ──'
+              sudo API_TAG=${API_TAG} docker compose up -d --no-deps api worker
+              echo
+              echo '── wait for /health to return 200 ──'
+              for i in \$(seq 1 30); do
+                if sudo docker exec cred-deploy-api-1 sh -c 'wget -q -O- http://localhost:3001/health' | grep -q '\"status\":\"ok\"'; then
+                  echo 'api healthy after '\$i' checks'
+                  break
+                fi
+                sleep 2
+              done"
+
+      - name: verify /version returns the sha we deployed
+        env:
+          EXPECTED: ${{ needs.build.outputs.sha }}
+        run: |
+          # Hit the api's /version via IAP-tunneled ssh (no need to
+          # expose the endpoint publicly). This is the assertion
+          # that closes the loop: "PR merged" and "prod running that
+          # sha" become the same event.
+          #
+          # /version reads /app/version.txt which the Dockerfile
+          # writes from the GIT_SHA build arg. If the deployed image
+          # was built from an older sha (or the pull didn't roll
+          # containers correctly), sha will not match and this step
+          # fails the workflow.
+          ACTUAL=$(gcloud compute ssh "${VM_NAME}" \
+            --zone="${VM_ZONE}" \
+            --tunnel-through-iap \
+            --quiet \
+            --command="sudo docker exec cred-deploy-api-1 sh -c 'wget -q -O- http://localhost:3001/version'" \
+            | grep -oE '"sha":"[^"]+"' \
+            | head -1 \
+            | cut -d'"' -f4)
+          echo "expected sha: ${EXPECTED}"
+          echo "prod sha:     ${ACTUAL}"
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "::error::prod is not running the sha we just deployed"
+            exit 1
+          fi
+          echo "::notice::deploy verified — prod is running ${ACTUAL}"
