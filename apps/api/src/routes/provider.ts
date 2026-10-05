@@ -107,6 +107,7 @@ providerRoutes.post("/provider/auth/preview", zValidator("json", PreviewSchema),
       workspaceId: schema.cases.workspaceId,
       targetSubmissionDate: schema.cases.targetSubmissionDate,
       firstName: schema.providers.firstName,
+      lastName: schema.providers.lastName,
       workspaceName: schema.workspaces.name,
     })
     .from(schema.caseAccessTokens)
@@ -157,6 +158,7 @@ providerRoutes.post("/provider/auth/preview", zValidator("json", PreviewSchema),
   return c.json({
     kind: "case",
     providerFirstName: row.firstName,
+    providerLastName: row.lastName,
     workspaceName: row.workspaceName,
     facilityName,
     totalSteps: 8,

@@ -1259,6 +1259,7 @@ interface FeCaseState {
     targetSubmissionDate: string | null;
   };
   providerFirstName: string;
+  providerLastName: string;
   steps: FeCaseStep[];
   requiredDocuments: FeRequiredDocSlot[];
   references: FeReferenceSummary[];
@@ -1314,7 +1315,10 @@ caseRoutes.get("/v1/cases/:caseId", async (c) => {
   // rls: bypass — global lookup tables; identifiers come from the
   // session-bound case row, not user input.
   const [providerRow] = await db()
-    .select({ firstName: schema.providers.firstName })
+    .select({
+      firstName: schema.providers.firstName,
+      lastName: schema.providers.lastName,
+    })
     .from(schema.providers)
     .where(eq(schema.providers.id, data.caseRow.providerId))
     .limit(1);
@@ -1428,6 +1432,7 @@ caseRoutes.get("/v1/cases/:caseId", async (c) => {
       targetSubmissionDate: data.caseRow.targetSubmissionDate ?? null,
     },
     providerFirstName: providerRow?.firstName ?? "",
+    providerLastName: providerRow?.lastName ?? "",
     steps,
     requiredDocuments,
     references: data.refs.map(projectReference),
