@@ -23,6 +23,9 @@ import { providerRoutes } from "./routes/provider.js";
 import { providerMeRoutes } from "./routes/providerMe.js";
 import { referenceRoutes } from "./routes/reference.js";
 import { supportRoutes } from "./routes/support.js";
+// 🧪 TEST API — only mounted when TEST_API_ENABLED=true (compose.test.yml).
+// See routes/testApi.ts for the double-gate.
+import { testApiRoutes } from "./routes/testApi.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import type { ApiBindings } from "./types.js";
 
@@ -64,6 +67,12 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", metricsRoutes);
   app.route("/", marketingLeadRoutes);
   app.route("/", supportRoutes);
+  if (process.env.TEST_API_ENABLED === "true") {
+    // Mount the test-only /test/* routes behind the gate. Handlers
+    // ALSO recheck the env on every request so the mount doesn't
+    // become permanent if the compose var is unset mid-run.
+    app.route("/", testApiRoutes);
+  }
 
   // Cockpit REST surface. Each sub-router applies requireStaffAuth +
   // requireTenancy on the `/v1/cockpit/*` prefix itself.
