@@ -8,7 +8,7 @@ import {
   sendEmail,
 } from "@cred/auth";
 import { env } from "@cred/config";
-import { db, schema } from "@cred/db";
+import { db, schema, withTenancy } from "@cred/db";
 import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import type { DocumentType } from "@cred/types/domain";
@@ -22,6 +22,7 @@ import { fromFeDocumentType } from "../graphql/mappings.js";
 import { requireWriterOnMutations } from "../middleware/rbac.js";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
+import { createCaseForProvider } from "../services/createCaseForProvider.js";
 import type { ApiBindings } from "../types.js";
 
 export const cockpitProviderRoutes = new Hono<ApiBindings>();
@@ -262,16 +263,42 @@ function notFoundResponse(c: Context<ApiBindings>): Response {
 // with the existing URL — no new token minted. Once redeemed, a new invite
 // re-issues cleanly.
 
+// Optional per-invite case. When provided, we materialize the case inline
+// alongside the invite — same approved-profile pin + dedupe rules as
+// POST /v1/cockpit/cases (shared via createCaseForProvider). Keeping this
+// opt-in means the plain workspace-invite flow (no case) still works.
+const InviteOpenCase = z.object({
+  facilityId: z.string().uuid(),
+  specialty: z.string().min(1).max(120),
+  targetSubmissionDate: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "expected YYYY-MM-DD")
+    .optional(),
+  purpose: z
+    .enum(["initial_appointment", "reappointment", "privileging"])
+    .default("initial_appointment"),
+});
+
 const InviteRow = z.object({
   email: z.string().trim().toLowerCase().email().max(255),
   fullName: z.string().trim().max(200).optional(),
+  openCase: InviteOpenCase.optional(),
 });
 const InviteBody = z.object({
   invites: z.array(InviteRow).min(1).max(20),
 });
 
 type InviteResult =
-  | { email: string; status: "sent"; url: string; expiresAt: string }
+  | {
+      email: string;
+      status: "sent";
+      url: string;
+      expiresAt: string;
+      /** Set when `openCase` was supplied AND the case was created or deduped. */
+      caseId?: string;
+      /** Human-readable facility name — surfaced in the Sent result table. */
+      caseFacilityName?: string;
+    }
   | { email: string; status: "already_invited"; expiresAt: string }
   | { email: string; status: "failed"; error: string };
 
@@ -341,21 +368,76 @@ cockpitProviderRoutes.post(
           "provider_workspace_invite_magic_link_issued",
         );
 
+        // Optional inline case. Runs BEFORE the email is sent so a
+        // facility-level failure (no approved profile, …) means the
+        // provider doesn't get a notification pointing at nothing. The
+        // provider account + invite row remain in place either way —
+        // the dedupe check above lets the operator retry cleanly.
+        let openedCase: { caseId: string; facilityName: string } | undefined;
+        if (row.openCase) {
+          const caseResult = await withTenancy(c.var.tenancy, async (tx) =>
+            createCaseForProvider(tx, workspaceId, {
+              providerId: account.providerId,
+              facilityId: row.openCase!.facilityId,
+              specialty: row.openCase!.specialty,
+              purpose: row.openCase!.purpose,
+              targetSubmissionDate: row.openCase!.targetSubmissionDate ?? null,
+              actorUserId: auth.session.userId,
+            }),
+          );
+          if (caseResult.kind === "no_approved_profile") {
+            results.push({
+              email: row.email,
+              status: "failed",
+              error: "Facility has no approved profile in this workspace",
+            });
+            continue;
+          }
+          if (caseResult.kind === "provider_not_in_workspace") {
+            // Should be impossible — we just granted them above. Treat as hard
+            // error so the operator sees something's wrong with the workspace
+            // state rather than a silent partial success.
+            results.push({
+              email: row.email,
+              status: "failed",
+              error: "Provider workspace grant missing",
+            });
+            continue;
+          }
+          const caseId =
+            caseResult.kind === "case_already_open" ? caseResult.caseId : caseResult.caseId;
+          // Look up facility name for the response + email. The name
+          // doesn't change often; a single-row select is fine here.
+          const [facilityRow] = await db()
+            .select({ name: schema.facilities.name })
+            .from(schema.facilities)
+            .where(eq(schema.facilities.id, row.openCase.facilityId))
+            .limit(1);
+          openedCase = { caseId, facilityName: facilityRow?.name ?? "your facility" };
+        }
+
         const firstName = row.fullName?.trim().split(/\s+/)[0] || "there";
-        await sendEmail({
-          to: row.email,
-          subject: "You've been invited to Roster Healthcare",
-          text: `Hi ${firstName},\n\nYou've been invited to join the Roster Healthcare credentialing platform. Accept your invite here:\n\n${url}\n\nThis link expires in 7 days. Once your invite is accepted we'll notify you by email as soon as your first credentialing case is ready.\n\n— The Roster Healthcare team`,
-        });
+        const subject = openedCase
+          ? `Credentialing with ${openedCase.facilityName} — your Roster Healthcare invite`
+          : "You've been invited to Roster Healthcare";
+        const text = openedCase
+          ? `Hi ${firstName},\n\nYou've been invited to credential with ${openedCase.facilityName} on Roster Healthcare. Start here:\n\n${url}\n\nThis link expires in 7 days.\n\n— The Roster Healthcare team`
+          : `Hi ${firstName},\n\nYou've been invited to join the Roster Healthcare credentialing platform. Accept your invite here:\n\n${url}\n\nThis link expires in 7 days. Once your invite is accepted we'll notify you by email as soon as your first credentialing case is ready.\n\n— The Roster Healthcare team`;
+        await sendEmail({ to: row.email, subject, text });
 
         await audit({
           workspaceId,
           actorUserId: auth.session.userId,
           actorType: "user",
-          action: "provider_invite.sent",
+          action: openedCase ? "provider_invite.sent_with_case" : "provider_invite.sent",
           targetEntityType: "workspace",
           targetEntityId: workspaceId,
-          after: { email: row.email, url, expiresAt: expiresAt.toISOString() },
+          after: {
+            email: row.email,
+            url,
+            expiresAt: expiresAt.toISOString(),
+            caseId: openedCase?.caseId,
+          },
           requestId: c.var.requestId,
         });
 
@@ -364,6 +446,9 @@ cockpitProviderRoutes.post(
           status: "sent",
           url,
           expiresAt: expiresAt.toISOString(),
+          ...(openedCase
+            ? { caseId: openedCase.caseId, caseFacilityName: openedCase.facilityName }
+            : {}),
         });
       } catch (err) {
         logger.error({ err, email: row.email, workspaceId }, "provider_workspace_invite_failed");

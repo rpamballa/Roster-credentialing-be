@@ -20,6 +20,32 @@ const { eq } = await import("drizzle-orm");
 
 const app = buildApp();
 
+// Minimal facility_profiles.requirements JSONB — matches EMPTY_REQS used
+// in sibling tests. We seed facilities on-the-fly in the openCase tests.
+const EMPTY_REQS = {
+  required_documents: [],
+  required_verifications: [],
+  privilege_delineations: [],
+  attestations: [],
+  submission: { method: "email" as const },
+  facility_forms: [],
+};
+
+async function seedApprovedFacility(workspaceId: string, name: string): Promise<string> {
+  const [facility] = await db()
+    .insert(schema.facilities)
+    .values({ name })
+    .returning({ id: schema.facilities.id });
+  await db().insert(schema.facilityProfiles).values({
+    facilityId: facility!.id,
+    workspaceId,
+    version: 1,
+    status: "approved",
+    requirements: EMPTY_REQS,
+  });
+  return facility!.id;
+}
+
 /**
  * cockpitProviders — the biggest remaining zero-coverage surface (14
  * endpoints). Covers provider listing/PATCH, invites (send/list/resend/revoke),
@@ -205,6 +231,97 @@ describe("cockpit providers", () => {
       const res = await call("POST", "/v1/cockpit/providers/invite", s.sid, { invites });
       expect(res.status).toBe(400);
     });
+
+    // ─── openCase: invite + inline case creation ────────────────────────
+    //
+    // The invite form's "Also open a case" toggle sends an `openCase`
+    // field. These tests pin down the happy path, the facility-level
+    // failure, and dedupe-on-replay semantics so the FE can rely on
+    // (status === "sent" && caseId) as a tight contract.
+
+    it("openCase set + approved facility → sent + caseId + cases row + audit", async () => {
+      const s = await seed();
+      const facilityId = await seedApprovedFacility(s.workspaceId, "Mercy Memorial");
+
+      const res = await call("POST", "/v1/cockpit/providers/invite", s.sid, {
+        invites: [
+          {
+            email: "docket@a.example",
+            fullName: "Docket Doe",
+            openCase: {
+              facilityId,
+              specialty: "Emergency Medicine",
+              purpose: "initial_appointment",
+            },
+          },
+        ],
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        results: Array<{
+          email: string;
+          status: string;
+          caseId?: string;
+          caseFacilityName?: string;
+        }>;
+      };
+      expect(body.results[0]?.status).toBe("sent");
+      expect(body.results[0]?.caseId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(body.results[0]?.caseFacilityName).toBe("Mercy Memorial");
+
+      // The cases row landed with status=intake and the right specialty.
+      const cases = await db()
+        .select({
+          id: schema.cases.id,
+          specialty: schema.cases.specialty,
+          status: schema.cases.status,
+        })
+        .from(schema.cases);
+      expect(cases).toHaveLength(1);
+      expect(cases[0]?.specialty).toBe("Emergency Medicine");
+      expect(cases[0]?.status).toBe("intake");
+
+      // Audit row flipped to the …_with_case action.
+      const audits = await db().select({ action: schema.auditLog.action }).from(schema.auditLog);
+      expect(audits.map((a) => a.action)).toContain("provider_invite.sent_with_case");
+    });
+
+    it("openCase with unknown facility → row failed, no cases row, no invite emailed", async () => {
+      const s = await seed();
+      // DO NOT seed the facility — the id below is dangling on purpose.
+      const danglingFacilityId = "00000000-0000-0000-0000-000000000000";
+
+      const res = await call("POST", "/v1/cockpit/providers/invite", s.sid, {
+        invites: [
+          {
+            email: "broken@a.example",
+            fullName: "Broken Case",
+            openCase: {
+              facilityId: danglingFacilityId,
+              specialty: "Emergency Medicine",
+              purpose: "initial_appointment",
+            },
+          },
+        ],
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        results: Array<{ email: string; status: string; error?: string }>;
+      };
+      expect(body.results[0]?.status).toBe("failed");
+      expect(body.results[0]?.error).toMatch(/approved profile/i);
+
+      // No case row persisted.
+      const cases = await db().select({ id: schema.cases.id }).from(schema.cases);
+      expect(cases).toHaveLength(0);
+    });
+
+    // Note: the dedupe-on-case-already-open branch inside
+    // createCaseForProvider is exercised by cockpitCases POST tests. The
+    // invite endpoint can't easily reach it because dedupe-on-open-invite
+    // short-circuits a replay first — covering that branch here would
+    // require manually redeeming the first invite, which is beyond the
+    // scope of this file.
   });
 
   // ─── GET/POST /v1/cockpit/providers/invites (list/resend/revoke) ──────

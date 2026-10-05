@@ -11,6 +11,7 @@ import { requireWriterOnMutations } from "../middleware/rbac.js";
 import { requireStaffAuth } from "../middleware/session.js";
 import { requireTenancy } from "../middleware/tenancy.js";
 import { recordCaseStatusEvent } from "../services/caseStatusEvents.js";
+import { createCaseForProvider } from "../services/createCaseForProvider.js";
 import { notifySupportTicket } from "../services/notifySupportTicket.js";
 import type { ApiBindings } from "../types.js";
 
@@ -948,89 +949,20 @@ cockpitCaseRoutes.post("/v1/cockpit/cases", zValidator("json", CreateCaseBody), 
   const workspaceId = c.var.tenancy.workspaceId;
   const body = c.req.valid("json");
 
-  // Validate the provider is in this workspace before the insert — the
-  // FK below only enforces existence, not workspace membership.
-  const created = await withTenancy(c.var.tenancy, async (tx) => {
-    const [grant] = await tx
-      .select({ providerId: schema.providerWorkspaceGrants.providerId })
-      .from(schema.providerWorkspaceGrants)
-      .where(
-        and(
-          eq(schema.providerWorkspaceGrants.providerId, body.providerId),
-          eq(schema.providerWorkspaceGrants.workspaceId, workspaceId),
-        ),
-      )
-      .limit(1);
-    if (!grant) return { kind: "provider_not_in_workspace" as const };
-
-    // Facility must have an approved profile in this workspace; pin the
-    // case to that profile's id + version.
-    const approvedRows = await tx
-      .select({
-        profileId: schema.facilityProfiles.id,
-        version: schema.facilityProfiles.version,
-      })
-      .from(schema.facilityProfiles)
-      .where(
-        and(
-          eq(schema.facilityProfiles.facilityId, body.facilityId),
-          eq(schema.facilityProfiles.workspaceId, workspaceId),
-          eq(schema.facilityProfiles.status, "approved"),
-        ),
-      )
-      .orderBy(desc(schema.facilityProfiles.version))
-      .limit(1);
-    const approved = approvedRows[0];
-    if (!approved) return { kind: "no_approved_profile" as const };
-
-    // Reject if an open case already exists for this (provider, facility).
-    // We treat submitted / completed / withdrawn as "done" so a repeat
-    // credentialing is allowed once the previous cycle is closed.
-    const [existingOpen] = await tx
-      .select({ id: schema.cases.id, status: schema.cases.status })
-      .from(schema.cases)
-      .where(
-        and(
-          eq(schema.cases.workspaceId, workspaceId),
-          eq(schema.cases.providerId, body.providerId),
-          eq(schema.cases.facilityProfileId, approved.profileId),
-          sql`${schema.cases.status} NOT IN ('submitted','completed','withdrawn')`,
-        ),
-      )
-      .limit(1);
-    if (existingOpen) {
-      return { kind: "case_already_open" as const, caseId: existingOpen.id };
-    }
-
-    const [row] = await tx
-      .insert(schema.cases)
-      .values({
-        workspaceId,
-        providerId: body.providerId,
-        facilityProfileId: approved.profileId,
-        facilityProfileVersion: String(approved.version),
-        specialty: body.specialty,
-        purpose: body.purpose,
-        status: "intake",
-        targetSubmissionDate: body.targetSubmissionDate ?? null,
-        assignedSpecialistId: auth.session.userId,
-      })
-      .returning({ id: schema.cases.id });
-    if (!row) throw new Error("case insert failed");
-    await recordCaseStatusEvent(tx, {
-      caseId: row.id,
-      workspaceId,
-      fromStatus: null,
-      toStatus: "intake",
+  // Validate the provider is in this workspace, pin the case to the
+  // facility's approved profile version, reject on dup-open, insert.
+  // Logic lives in `createCaseForProvider` so the invite-send flow (which
+  // can tick "also open a case") reuses the exact same guards.
+  const created = await withTenancy(c.var.tenancy, async (tx) =>
+    createCaseForProvider(tx, workspaceId, {
+      providerId: body.providerId,
+      facilityId: body.facilityId,
+      specialty: body.specialty,
+      purpose: body.purpose,
+      targetSubmissionDate: body.targetSubmissionDate ?? null,
       actorUserId: auth.session.userId,
-    });
-    return {
-      kind: "ok" as const,
-      caseId: row.id,
-      facilityProfileId: approved.profileId,
-      facilityProfileVersion: approved.version,
-    };
-  });
+    }),
+  );
 
   if (created.kind === "provider_not_in_workspace") {
     return c.json(
