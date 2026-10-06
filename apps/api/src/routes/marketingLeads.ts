@@ -10,7 +10,7 @@ import { verifyTurnstile } from "../services/verifyTurnstile.js";
 import type { ApiBindings } from "../types.js";
 
 const MarketingLeadSchema = z.object({
-  kind: z.enum(["beta", "demo"]),
+  kind: z.enum(["beta", "demo", "trial"]),
   email: z.string().email().max(320),
   fullName: z.string().min(1).max(160),
   agency: z.string().min(1).max(160),
@@ -116,11 +116,15 @@ async function sendApplicantConfirmation(body: z.infer<typeof MarketingLeadSchem
   const subject =
     kind === "beta"
       ? "Your Roster Healthcare beta application"
-      : "Your Roster Healthcare demo request";
+      : kind === "trial"
+        ? "Your Provider Simulation Trial application"
+        : "Your Roster Healthcare demo request";
   const opener =
     kind === "beta"
       ? "Thanks for applying to the Roster Healthcare beta."
-      : "Thanks for requesting a Roster Healthcare demo.";
+      : kind === "trial"
+        ? "Thanks for applying to the Provider Simulation Trial."
+        : "Thanks for requesting a Roster Healthcare demo.";
   const text = [
     `Hi ${firstName(body.fullName)},`,
     "",
