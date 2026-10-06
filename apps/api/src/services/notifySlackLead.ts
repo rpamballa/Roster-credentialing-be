@@ -2,7 +2,7 @@ import { env } from "@cred/config";
 import { logger } from "@cred/observability";
 
 interface SlackLeadPayload {
-  kind: "beta" | "demo";
+  kind: "beta" | "demo" | "trial";
   fullName: string;
   email: string;
   agency: string;
@@ -11,6 +11,12 @@ interface SlackLeadPayload {
   freeText?: string | null | undefined;
   sourcePath?: string | null | undefined;
 }
+
+const SLACK_LEAD_LABEL: Record<SlackLeadPayload["kind"], string> = {
+  beta: "beta application",
+  demo: "demo request",
+  trial: "simulation trial application",
+};
 
 /**
  * Ping the marketing-leads Slack channel when a new lead arrives.
@@ -29,10 +35,15 @@ export async function notifySlackLead(payload: SlackLeadPayload): Promise<void> 
   }
 
   const lines = [
-    `*New ${payload.kind === "beta" ? "beta application" : "demo request"}*`,
+    `*New ${SLACK_LEAD_LABEL[payload.kind]}*`,
     `*${payload.fullName}* (${payload.email}) — ${payload.agency}`,
   ];
-  if (payload.role) lines.push(`Role: ${payload.role}`);
+  if (payload.role) {
+    // For `trial` the `role` column carries the applicant's primary specialty,
+    // not their job title. Rename the field inline so the Slack message reads
+    // naturally in both cases.
+    lines.push(`${payload.kind === "trial" ? "Specialty" : "Role"}: ${payload.role}`);
+  }
   if (payload.volume) lines.push(`Volume: ${payload.volume}`);
   if (payload.freeText) lines.push(`> ${payload.freeText.slice(0, 400)}`);
   if (payload.sourcePath) lines.push(`Source: \`${payload.sourcePath}\``);
