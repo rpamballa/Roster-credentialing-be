@@ -132,6 +132,17 @@ jobs:
               echo '── pull the api image tagged '${API_TAG}' ──'
               sudo API_TAG=${API_TAG} docker compose pull api worker
               echo
+              echo '── run drizzle migrations against prod postgres ──'
+              # One-off container using the api image we just pulled.
+              # --no-deps: postgres is already running from the main stack.
+              # --rm: discard the migrator container after it exits.
+              # If the migrator exits non-zero (bad SQL, duplicate migration,
+              # version drift) set -euo pipefail aborts the deploy BEFORE the
+              # api/worker containers are rolled, so prod keeps serving the
+              # previous (schema-compatible) image.
+              sudo API_TAG=${API_TAG} docker compose run --rm --no-deps api \
+                tsx packages/db/src/migrate.ts
+              echo
               echo '── roll api + worker with the new image ──'
               sudo API_TAG=${API_TAG} docker compose up -d --no-deps api worker
               echo
