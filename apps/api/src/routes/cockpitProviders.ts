@@ -675,6 +675,127 @@ cockpitProviderRoutes.post("/v1/cockpit/providers/invites/:inviteId/revoke", asy
   return c.json({ ok: true });
 });
 
+// ─── DELETE /v1/cockpit/providers/invites/:inviteId ──────────────────────
+// Hard-delete a terminal invite row. The provider record + workspace
+// grant stay in place — only the invite history goes. Guarded against
+// deleting PENDING invites: staff must Revoke first (so a Resend/Revoke
+// decision doesn't get short-circuited by a slip).
+//
+// 404 when the row doesn't exist in this workspace OR when it exists
+// but is still pending. The two cases are returned with distinct error
+// titles so the FE can show a useful message.
+cockpitProviderRoutes.delete("/v1/cockpit/providers/invites/:inviteId", async (c) => {
+  const auth = c.var.staffAuth;
+  const workspaceId = c.var.tenancy.workspaceId;
+  const inviteId = c.req.param("inviteId");
+
+  // Fetch the row first so we can tell "doesn't exist" from "still pending"
+  // and so the audit entry has the email.
+  const [row] = await db()
+    .select({
+      id: schema.providerInviteTokens.id,
+      email: schema.providerInviteTokens.email,
+      redeemedAt: schema.providerInviteTokens.redeemedAt,
+      revokedAt: schema.providerInviteTokens.revokedAt,
+      expiresAt: schema.providerInviteTokens.expiresAt,
+    })
+    .from(schema.providerInviteTokens)
+    .where(
+      and(
+        eq(schema.providerInviteTokens.id, inviteId),
+        eq(schema.providerInviteTokens.workspaceId, workspaceId),
+      ),
+    )
+    .limit(1);
+
+  if (!row) {
+    return c.json(
+      {
+        type: "about:blank",
+        title: "Not Found",
+        status: 404,
+        instance: c.var.requestId,
+      },
+      404,
+    );
+  }
+
+  const now = Date.now();
+  const isPending = !row.redeemedAt && !row.revokedAt && row.expiresAt.getTime() > now;
+  if (isPending) {
+    return c.json(
+      {
+        type: "https://errors.cred/provider-invite/pending-not-deletable",
+        title: "Revoke the invite before removing it",
+        status: 409,
+        instance: c.var.requestId,
+      },
+      409,
+    );
+  }
+
+  await db()
+    .delete(schema.providerInviteTokens)
+    .where(
+      and(
+        eq(schema.providerInviteTokens.id, inviteId),
+        eq(schema.providerInviteTokens.workspaceId, workspaceId),
+      ),
+    );
+
+  await audit({
+    workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "provider_invite.deleted",
+    targetEntityType: "workspace",
+    targetEntityId: workspaceId,
+    after: { inviteId, email: row.email },
+    requestId: c.var.requestId,
+  });
+
+  return c.json({ ok: true });
+});
+
+// ─── POST /v1/cockpit/providers/invites/cleanup ──────────────────────────
+// Bulk-remove every terminal invite in the workspace (accepted / expired
+// / revoked). Pending invites are left alone — see the per-row DELETE
+// guard above for rationale. Returns the count so the UI can show
+// "Removed N invites" rather than guessing.
+cockpitProviderRoutes.post("/v1/cockpit/providers/invites/cleanup", async (c) => {
+  const auth = c.var.staffAuth;
+  const workspaceId = c.var.tenancy.workspaceId;
+  const now = new Date();
+
+  // Terminal = redeemed OR revoked OR expired. Mirror the status
+  // derivation in the GET /invites list so the UI's "Clean up completed"
+  // button acts on exactly the rows the UI calls completed.
+  const deleted = await db()
+    .delete(schema.providerInviteTokens)
+    .where(
+      and(
+        eq(schema.providerInviteTokens.workspaceId, workspaceId),
+        sql`(${schema.providerInviteTokens.redeemedAt} IS NOT NULL
+             OR ${schema.providerInviteTokens.revokedAt} IS NOT NULL
+             OR ${schema.providerInviteTokens.expiresAt} <= ${now})`,
+      ),
+    )
+    .returning({ id: schema.providerInviteTokens.id });
+
+  await audit({
+    workspaceId,
+    actorUserId: auth.session.userId,
+    actorType: "user",
+    action: "provider_invites.cleanup",
+    targetEntityType: "workspace",
+    targetEntityId: workspaceId,
+    after: { count: deleted.length },
+    requestId: c.var.requestId,
+  });
+
+  return c.json({ ok: true, deleted: deleted.length });
+});
+
 // ─── GET /v1/cockpit/providers ────────────────────────────────────────────
 // Workspace's provider roster — everyone with an active
 // provider_workspace_grants row for this workspace. Includes an
