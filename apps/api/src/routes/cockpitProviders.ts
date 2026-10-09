@@ -13,7 +13,7 @@ import { audit, logger } from "@cred/observability";
 import { getObjectStorage } from "@cred/storage";
 import type { DocumentType } from "@cred/types/domain";
 import { zValidator } from "@hono/zod-validator";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import heicConvert from "heic-convert";
 import { type Context, Hono } from "hono";
 import sharp from "sharp";
@@ -770,14 +770,22 @@ cockpitProviderRoutes.post("/v1/cockpit/providers/invites/cleanup", async (c) =>
   // Terminal = redeemed OR revoked OR expired. Mirror the status
   // derivation in the GET /invites list so the UI's "Clean up completed"
   // button acts on exactly the rows the UI calls completed.
+  //
+  // Uses typed drizzle operators rather than a raw sql`` template so
+  // the Date → timestamp binding goes through drizzle's column
+  // serializer. Earlier shape (sql`... <= ${now}`) passed a raw JS Date
+  // straight to postgres-js and crashed with "argument must be string
+  // or Buffer" — covered by cockpitProviders.test.ts invite-cleanup.
   const deleted = await db()
     .delete(schema.providerInviteTokens)
     .where(
       and(
         eq(schema.providerInviteTokens.workspaceId, workspaceId),
-        sql`(${schema.providerInviteTokens.redeemedAt} IS NOT NULL
-             OR ${schema.providerInviteTokens.revokedAt} IS NOT NULL
-             OR ${schema.providerInviteTokens.expiresAt} <= ${now})`,
+        or(
+          isNotNull(schema.providerInviteTokens.redeemedAt),
+          isNotNull(schema.providerInviteTokens.revokedAt),
+          lte(schema.providerInviteTokens.expiresAt, now),
+        ),
       ),
     )
     .returning({ id: schema.providerInviteTokens.id });
