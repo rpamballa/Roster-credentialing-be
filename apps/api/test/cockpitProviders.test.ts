@@ -370,6 +370,116 @@ describe("cockpit providers", () => {
     });
   });
 
+  // ─── DELETE /invites/:id + POST /invites/cleanup ─────────────────────
+  //
+  // Hard-delete semantics (be#55). Terminal-only guard keeps the
+  // operator from accidentally wiping an invite someone is about to
+  // redeem.
+  describe("invite cleanup", () => {
+    it("DELETE on a revoked invite → row gone, audit written", async () => {
+      const s = await seed();
+      await call("POST", "/v1/cockpit/providers/invite", s.sid, {
+        invites: [{ email: "revoked@a.example", fullName: "To Remove" }],
+      });
+      const listBefore = (await (
+        await call("GET", "/v1/cockpit/providers/invites", s.sid)
+      ).json()) as { invites: Array<{ id: string; email: string }> };
+      const inviteId = listBefore.invites.find((i) => i.email === "revoked@a.example")!.id;
+
+      // Revoke first → terminal state.
+      await call("POST", `/v1/cockpit/providers/invites/${inviteId}/revoke`, s.sid);
+
+      const del = await call("DELETE", `/v1/cockpit/providers/invites/${inviteId}`, s.sid);
+      expect(del.status).toBe(200);
+
+      // Row is gone.
+      const rows = await db()
+        .select({ id: schema.providerInviteTokens.id })
+        .from(schema.providerInviteTokens)
+        .where(eq(schema.providerInviteTokens.id, inviteId));
+      expect(rows).toHaveLength(0);
+
+      // Audit entry recorded for the deletion.
+      const audits = await db().select({ action: schema.auditLog.action }).from(schema.auditLog);
+      expect(audits.map((a) => a.action)).toContain("provider_invite.deleted");
+    });
+
+    it("DELETE on a pending invite → 409 with the 'revoke first' title", async () => {
+      const s = await seed();
+      await call("POST", "/v1/cockpit/providers/invite", s.sid, {
+        invites: [{ email: "pending@a.example", fullName: "Pending" }],
+      });
+      const list = (await (await call("GET", "/v1/cockpit/providers/invites", s.sid)).json()) as {
+        invites: Array<{ id: string; email: string }>;
+      };
+      const inviteId = list.invites.find((i) => i.email === "pending@a.example")!.id;
+
+      const res = await call("DELETE", `/v1/cockpit/providers/invites/${inviteId}`, s.sid);
+      expect(res.status).toBe(409);
+      const body = (await res.json()) as { title: string };
+      expect(body.title).toMatch(/revoke.*before.*removing/i);
+
+      // Row is still there — belt-and-braces, make sure the 409 didn't
+      // delete anyway.
+      const stillThere = await db()
+        .select({ id: schema.providerInviteTokens.id })
+        .from(schema.providerInviteTokens)
+        .where(eq(schema.providerInviteTokens.id, inviteId));
+      expect(stillThere).toHaveLength(1);
+    });
+
+    it("DELETE on an unknown invite id → 404", async () => {
+      const s = await seed();
+      const fakeId = "00000000-0000-0000-0000-000000000000";
+      const res = await call("DELETE", `/v1/cockpit/providers/invites/${fakeId}`, s.sid);
+      expect(res.status).toBe(404);
+    });
+
+    it("POST /invites/cleanup deletes terminal rows, leaves pending, returns count", async () => {
+      const s = await seed();
+      // Three invites: one we'll leave pending, one we revoke, one we
+      // backdate past expires_at to simulate 'expired'.
+      await call("POST", "/v1/cockpit/providers/invite", s.sid, {
+        invites: [
+          { email: "pending@a.example", fullName: "P" },
+          { email: "revoked@a.example", fullName: "R" },
+          { email: "expired@a.example", fullName: "E" },
+        ],
+      });
+      const list = (await (await call("GET", "/v1/cockpit/providers/invites", s.sid)).json()) as {
+        invites: Array<{ id: string; email: string; status: string }>;
+      };
+      const pending = list.invites.find((i) => i.email === "pending@a.example")!;
+      const revoked = list.invites.find((i) => i.email === "revoked@a.example")!;
+      const expired = list.invites.find((i) => i.email === "expired@a.example")!;
+
+      // Revoke one; expire the other directly in the DB (no public
+      // endpoint for 'expire').
+      await call("POST", `/v1/cockpit/providers/invites/${revoked.id}/revoke`, s.sid);
+      await db()
+        .update(schema.providerInviteTokens)
+        .set({ expiresAt: new Date(Date.now() - 60_000) })
+        .where(eq(schema.providerInviteTokens.id, expired.id));
+
+      const res = await call("POST", "/v1/cockpit/providers/invites/cleanup", s.sid);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { ok: boolean; deleted: number };
+      expect(body.ok).toBe(true);
+      expect(body.deleted).toBe(2);
+
+      // Only the pending row survives.
+      const remaining = await db()
+        .select({ id: schema.providerInviteTokens.id })
+        .from(schema.providerInviteTokens);
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0]!.id).toBe(pending.id);
+
+      // Audit for the cleanup action was recorded.
+      const audits = await db().select({ action: schema.auditLog.action }).from(schema.auditLog);
+      expect(audits.map((a) => a.action)).toContain("provider_invites.cleanup");
+    });
+  });
+
   // ─── verifications ─────────────────────────────────────────────────────
   describe("verifications", () => {
     it("POST add → 201 + GET returns it, DELETE → 204 + gone", async () => {
