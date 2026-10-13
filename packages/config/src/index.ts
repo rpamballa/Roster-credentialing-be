@@ -21,12 +21,22 @@ const EnvSchema = z.object({
   GCP_PROJECT_ID: z.string().optional(),
   GCS_BUCKET: z.string().default("cred-dev"),
   // Internal address the SDK dials (docker service DNS in compose).
-  STORAGE_EMULATOR_HOST: z.string().url().optional(),
+  // Empty string is treated as unset — the deploy compose hard-codes a
+  // dev-friendly default and prod overrides it to an empty .env value
+  // rather than removing the key entirely (which would break fresh dev
+  // checkouts). The adapter's own check also handles this defensively.
+  STORAGE_EMULATOR_HOST: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().url().optional(),
+  ),
   // Address the browser dials for direct uploads/downloads. Same host in
   // most setups; different only when the emulator is reachable at one
   // host inside the docker network and another from the developer's
   // laptop (e.g. `http://localhost:4443` vs `http://gcs-emulator:4443`).
-  STORAGE_EMULATOR_PUBLIC_URL: z.string().url().optional(),
+  STORAGE_EMULATOR_PUBLIC_URL: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.string().url().optional(),
+  ),
 
   TEMPORAL_ADDRESS: z.string().default("localhost:7233"),
   TEMPORAL_NAMESPACE: z.string().default("default"),

@@ -33,7 +33,17 @@ export class GCSAdapter implements ObjectStorage {
     // Setting apiEndpoint tells the SDK to talk to the emulator. The
     // corresponding STORAGE_EMULATOR_HOST env var is also picked up by
     // helpers inside @google-cloud/storage, so we set both.
-    const emulator = cfg.STORAGE_EMULATOR_HOST;
+    //
+    // Empty string is treated as "no emulator" the same way an unset
+    // variable is. The deploy compose file hard-coded the dev
+    // emulator URL for both environments; prod now overrides it to
+    // the empty string via its .env instead of removing the key
+    // entirely (removing it would make dev break on fresh checkouts).
+    // Prior to this guard, the empty override still took the emulator
+    // branch below and the api failed every signed-URL fetch in prod
+    // with `getaddrinfo ENOTFOUND gcs-emulator`.
+    const emulator = cfg.STORAGE_EMULATOR_HOST?.trim() || undefined;
+    const emulatorPublic = cfg.STORAGE_EMULATOR_PUBLIC_URL?.trim() || undefined;
     if (emulator) {
       process.env.STORAGE_EMULATOR_HOST = emulator;
     }
@@ -45,7 +55,7 @@ export class GCSAdapter implements ObjectStorage {
     // Two emulator URLs — one for browsers (baked into signed URLs) and
     // one for server-side calls the API makes to verify uploads.
     this.emulatorInternalUrl = emulator;
-    this.emulatorPublicUrl = cfg.STORAGE_EMULATOR_PUBLIC_URL ?? emulator;
+    this.emulatorPublicUrl = emulatorPublic ?? emulator;
   }
 
   async putSignedUrl(params: {
