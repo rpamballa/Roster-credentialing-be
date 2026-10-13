@@ -202,4 +202,72 @@ describe("/v1/cases/:caseId auth chain", () => {
     const res = await call("GET", `/v1/cases/${s.caseId}`, sid);
     expect(res.status).toBe(401);
   });
+
+  // ─── POST /v1/cases/:caseId/handoff ──────────────────────────────────
+  // Short-lived case-access token the provider can scan from desktop to
+  // continue on their phone. Backs the desktop-only QR code on the
+  // provider document-upload pages (see components/provider/
+  // MobileHandoffQR.tsx on the FE).
+  describe("POST /:caseId/handoff — desktop → phone QR hand-off", () => {
+    async function post(path: string, cookie?: string): Promise<Response> {
+      return app.fetch(
+        new Request(`http://localhost${path}`, {
+          method: "POST",
+          headers: cookie ? { cookie: `cred_sid=${cookie}` } : {},
+        }),
+      );
+    }
+
+    it("own case → 200 with /invite URL + expiresAt + token row persisted", async () => {
+      const s = await seed();
+      const sid = await staffSession(s.userId, "provider@example.com");
+      const res = await post(`/v1/cases/${s.caseId}/handoff`, sid);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { url: string; expiresAt: string };
+      // /invite/<token> on the configured WEB_PUBLIC_URL. The token is
+      // 32 random bytes → 43 base64url chars; use a shape match rather
+      // than hard-coding the length so a future TOKEN_BYTES change
+      // doesn't nuke this test.
+      expect(body.url).toMatch(/^http:\/\/localhost:3000\/invite\/[A-Za-z0-9_-]+$/);
+      const expiresAt = new Date(body.expiresAt).getTime();
+      // Token is minted with a 10-minute TTL — allow a wide window to
+      // absorb test machine latency.
+      expect(expiresAt - Date.now()).toBeGreaterThan(9 * 60 * 1000);
+      expect(expiresAt - Date.now()).toBeLessThan(11 * 60 * 1000);
+
+      // The token row landed in case_access_tokens, scoped to the
+      // right case and provider.
+      const tokens = await db()
+        .select({
+          caseId: schema.caseAccessTokens.caseId,
+          providerId: schema.caseAccessTokens.providerId,
+        })
+        .from(schema.caseAccessTokens)
+        .where(eq(schema.caseAccessTokens.caseId, s.caseId));
+      expect(tokens).toHaveLength(1);
+      expect(tokens[0]?.providerId).toBe(s.providerId);
+    });
+
+    it("someone else's case → 401, no token minted", async () => {
+      const s = await seed();
+      const sid = await staffSession(s.userId, "provider@example.com");
+      const res = await post(`/v1/cases/${s.otherCaseId}/handoff`, sid);
+      expect(res.status).toBe(401);
+      // No token should land for the other case.
+      const tokens = await db()
+        .select({ id: schema.caseAccessTokens.id })
+        .from(schema.caseAccessTokens);
+      expect(tokens).toHaveLength(0);
+    });
+
+    it("no session → 401, no token minted", async () => {
+      const s = await seed();
+      const res = await post(`/v1/cases/${s.caseId}/handoff`);
+      expect(res.status).toBe(401);
+      const tokens = await db()
+        .select({ id: schema.caseAccessTokens.id })
+        .from(schema.caseAccessTokens);
+      expect(tokens).toHaveLength(0);
+    });
+  });
 });
