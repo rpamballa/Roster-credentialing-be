@@ -12,7 +12,7 @@
 // path `:caseId` to that session.
 
 import { randomUUID } from "node:crypto";
-import { issueReferenceToken, sendEmail } from "@cred/auth";
+import { issueCaseAccessToken, issueReferenceToken, sendEmail } from "@cred/auth";
 import { env } from "@cred/config";
 import { db, schema, withTenancy } from "@cred/db";
 import { audit, logger } from "@cred/observability";
@@ -1443,4 +1443,45 @@ caseRoutes.get("/v1/cases/:caseId", async (c) => {
   };
 
   return c.json(out);
+});
+
+// ─── POST /v1/cases/:caseId/handoff ──────────────────────────────────────
+// Mint a short-lived case-access token the provider can scan from desktop
+// to continue on their phone (QR code on the document-upload pages).
+//
+// The provider is already signed in (requireProviderAuth above), so the
+// token is bound to the same case the current session owns. TTL is
+// deliberately short — 10 minutes — because the QR is only useful for
+// the next few seconds while the operator is in front of the screen.
+caseRoutes.post("/v1/cases/:caseId/handoff", async (c) => {
+  const guard = assertSessionOwnsCase(c);
+  if (guard) return guard;
+
+  const auth = c.var.providerAuth!;
+  const tenancy = c.var.tenancy;
+  const caseId = c.req.param("caseId");
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+  const { token } = await issueCaseAccessToken({
+    caseId,
+    providerId: auth.session.providerId,
+    workspaceId: tenancy.workspaceId,
+    expiresAt,
+    issuedByUserId: null, // provider-initiated, no cockpit user
+  });
+
+  const url = new URL(`/invite/${token}`, env().WEB_PUBLIC_URL).toString();
+
+  await audit({
+    workspaceId: tenancy.workspaceId,
+    actorUserId: null,
+    actorType: "system",
+    action: "provider.case_handoff.issued",
+    targetEntityType: "case",
+    targetEntityId: caseId,
+    after: { expiresAt: expiresAt.toISOString() },
+    requestId: c.var.requestId,
+  });
+
+  return c.json({ url, expiresAt: expiresAt.toISOString() });
 });
