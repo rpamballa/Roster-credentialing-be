@@ -46,6 +46,19 @@ export class GCSAdapter implements ObjectStorage {
     const emulatorPublic = cfg.STORAGE_EMULATOR_PUBLIC_URL?.trim() || undefined;
     if (emulator) {
       process.env.STORAGE_EMULATOR_HOST = emulator;
+    } else {
+      // @google-cloud/storage reads STORAGE_EMULATOR_HOST directly from
+      // process.env on its auth + signing paths — not through our
+      // @cred/config layer. An empty-string env var ("STORAGE_EMULATOR_HOST=")
+      // isn't the same as unset: the SDK still enters emulator mode and
+      // then throws `TypeError: Invalid URL` when it tries `new URL("")`.
+      // Prod's .env uses the empty-string form to opt out of the dev
+      // default (so the compose default-fallback stays dev-friendly), so
+      // we actively DELETE the env var here when the config resolves to
+      // no emulator. `env.FOO = undefined` would coerce to the literal
+      // string "undefined", which is worse than empty.
+      // biome-ignore lint/performance/noDelete: must remove the key, not blank it — the SDK's presence check is !== undefined, not truthiness.
+      delete process.env.STORAGE_EMULATOR_HOST;
     }
     this.storage = new Storage({
       ...(cfg.GCP_PROJECT_ID ? { projectId: cfg.GCP_PROJECT_ID } : {}),
