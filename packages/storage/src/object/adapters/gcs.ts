@@ -55,7 +55,9 @@ export class GCSAdapter implements ObjectStorage {
       // Prod's .env uses the empty-string form to opt out of the dev
       // default (so the compose default-fallback stays dev-friendly), so
       // we actively DELETE the env var here when the config resolves to
-      // no emulator.
+      // no emulator. `env.FOO = undefined` would coerce to the literal
+      // string "undefined", which is worse than empty.
+      // biome-ignore lint/performance/noDelete: must remove the key, not blank it — the SDK's presence check is !== undefined, not truthiness.
       delete process.env.STORAGE_EMULATOR_HOST;
     }
     this.storage = new Storage({
