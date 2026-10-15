@@ -26,18 +26,11 @@ process.env.REDIS_URL ??= "redis://localhost:6379/1";
  *      treats "set to empty" as "use emulator at <nothing>", then
  *      throws TypeError: Invalid URL.
  *
- * The @google-cloud/storage SDK itself is mocked so we can inspect the
- * `apiEndpoint` constructor arg (the other half of the real-GCS
- * decision) without hitting network.
+ * The @google-cloud/storage SDK is mocked so tests don't try to resolve
+ * real GCS credentials; we don't assert on the mock, we assert on the
+ * observable effects (process.env state, putSignedUrl output).
  */
 
-// Mock Storage so tests don't try to resolve real GCS credentials.
-// We don't assert on this mock's call history — the regression we care
-// about is observable through `process.env.STORAGE_EMULATOR_HOST` state
-// (whether the adapter deleted it) and through the emulator URL that
-// `putSignedUrl` returns (which proves the dev branch chose the right
-// host). Both are stable across `vi.resetModules()` without needing a
-// hoisted spy.
 vi.mock("@google-cloud/storage", () => ({
   Storage: vi.fn().mockImplementation(() => ({
     bucket: () => ({
@@ -48,28 +41,49 @@ vi.mock("@google-cloud/storage", () => ({
   })),
 }));
 
+// Snapshot the keys this file touches so afterEach can restore them
+// exactly as the worker had them. Sibling test files (packet.test.ts,
+// webhooks.test.ts, etc.) all share the same vitest worker process and
+// read these vars at module eval time — if we leak our synthetic values
+// their assertions break (seen on the first CI run of this PR).
+const TOUCHED_KEYS = [
+  "STORAGE_EMULATOR_HOST",
+  "STORAGE_EMULATOR_PUBLIC_URL",
+  "GCS_BUCKET",
+] as const;
+const originalEnv: Record<string, string | undefined> = {};
+for (const k of TOUCHED_KEYS) {
+  originalEnv[k] = process.env[k];
+}
+
+function restoreEnv() {
+  for (const k of TOUCHED_KEYS) {
+    const original = originalEnv[k];
+    if (original === undefined) {
+      // biome-ignore lint/performance/noDelete: must remove the key, not blank it
+      delete process.env[k];
+    } else {
+      process.env[k] = original;
+    }
+  }
+}
+
 describe("STORAGE_EMULATOR_HOST empty-string handling", () => {
   beforeEach(() => {
-    // Deletes are intentional — the whole bug chain this file covers
-    // is that an empty-string env var is NOT the same as unset to the
-    // Google Cloud SDK, so tests must distinguish between them.
+    // Start every test from the same baseline: nothing emulator-ish
+    // set, GCS_BUCKET pinned to a test-specific value.
     // biome-ignore lint/performance/noDelete: must remove the key, not blank it
     delete process.env.STORAGE_EMULATOR_HOST;
     // biome-ignore lint/performance/noDelete: must remove the key, not blank it
     delete process.env.STORAGE_EMULATOR_PUBLIC_URL;
     process.env.GCS_BUCKET = "cred-test";
-    // Reset modules so @cred/config's cached singleton re-parses the
-    // fresh process.env on next import. Doing this in beforeEach AND
-    // afterEach: once to prime, once to leave no state for sibling
-    // test files that might transitively re-import @cred/config.
     vi.resetModules();
   });
 
   afterEach(() => {
-    // biome-ignore lint/performance/noDelete: must remove the key, not blank it
-    delete process.env.STORAGE_EMULATOR_HOST;
-    // biome-ignore lint/performance/noDelete: must remove the key, not blank it
-    delete process.env.STORAGE_EMULATOR_PUBLIC_URL;
+    // Fully restore the worker's env + rebuild the module graph so
+    // sibling files load a fresh @cred/config against the real env.
+    restoreEnv();
     vi.resetModules();
   });
 
@@ -81,10 +95,9 @@ describe("STORAGE_EMULATOR_HOST empty-string handling", () => {
     });
 
     it("whitespace-only STORAGE_EMULATOR_HOST resolves to undefined (via the per-field zod .preprocess)", async () => {
-      // The generic loadEnv coerce only strips "" — the .preprocess
+      // loadEnv's generic coerce only strips exact "" — the .preprocess
       // on this specific field strips "  \n\t" too. This is the test
-      // that will catch a regression that drops the preprocess block
-      // from the storage emulator fields.
+      // that catches a regression that drops the preprocess block.
       process.env.STORAGE_EMULATOR_HOST = "   ";
       const { env } = await import("@cred/config");
       expect(env().STORAGE_EMULATOR_HOST).toBeUndefined();
@@ -109,35 +122,31 @@ describe("STORAGE_EMULATOR_HOST empty-string handling", () => {
     });
   });
 
-  describe("GCSAdapter — constructor env + SDK wiring on the real-GCS branch", () => {
+  describe("GCSAdapter — constructor env hygiene on the real-GCS branch", () => {
     it("DELETES process.env.STORAGE_EMULATOR_HOST when the config resolves to no emulator", async () => {
-      // Simulates prod: compose sets the var to empty, config folds to
-      // undefined, adapter strips it entirely so the Google SDK's own
-      // `process.env.STORAGE_EMULATOR_HOST !== undefined` check takes
-      // the real-GCS branch on its auth path.
       process.env.STORAGE_EMULATOR_HOST = "";
       const { GCSAdapter } = await import("@cred/storage/object");
       new GCSAdapter();
-      // Not just "set to empty" — gone. The SDK's check is presence,
-      // not truthiness.
+      // Not just "set to empty" — gone. The Google SDK's own check is
+      // `env.STORAGE_EMULATOR_HOST !== undefined`, not truthiness.
       expect("STORAGE_EMULATOR_HOST" in process.env).toBe(false);
     });
 
     it("DELETES the var even when it was absent to begin with (idempotent, cleanup-safe)", async () => {
-      // biome-ignore lint/performance/noDelete: must remove the key, not blank it
-      delete process.env.STORAGE_EMULATOR_HOST;
+      // beforeEach already removes it; adapter should still produce
+      // the absent state (not throw on the delete-of-missing).
       const { GCSAdapter } = await import("@cred/storage/object");
       new GCSAdapter();
       expect("STORAGE_EMULATOR_HOST" in process.env).toBe(false);
     });
 
-    // NOTE: We don't test the real-GCS branch end-to-end here because
-    // the Google SDK's signed-URL path requires real credentials and
-    // the module-level `vi.mock` isn't picked up by the adapter when
-    // it's imported through the workspace package graph after
-    // vi.resetModules(). The env hygiene assertions above are the
-    // regression protection that matters — if STORAGE_EMULATOR_HOST
-    // is deleted, the SDK takes the real-GCS branch by definition.
+    // NOTE: We don't test the real-GCS branch end-to-end because the
+    // Google SDK's signed-URL path requires real credentials and the
+    // module-level vi.mock isn't picked up by the adapter after
+    // vi.resetModules() + workspace package resolution. The env
+    // hygiene assertions above are the regression protection — if
+    // STORAGE_EMULATOR_HOST is deleted, the SDK takes the real-GCS
+    // branch by definition.
   });
 
   describe("GCSAdapter — emulator branch (local dev)", () => {
@@ -145,8 +154,6 @@ describe("STORAGE_EMULATOR_HOST empty-string handling", () => {
       process.env.STORAGE_EMULATOR_HOST = "http://gcs-emulator:4443";
       const { GCSAdapter } = await import("@cred/storage/object");
       new GCSAdapter();
-      // Dev mode: env stays set so the Google SDK routes every call to
-      // the emulator on its own auth path too.
       expect(process.env.STORAGE_EMULATOR_HOST).toBe("http://gcs-emulator:4443");
     });
 
@@ -158,30 +165,26 @@ describe("STORAGE_EMULATOR_HOST empty-string handling", () => {
         key: "fac/mercy/packet.pdf",
         contentType: "application/pdf",
       });
-      // Emulator branch forms its own upload URL — doesn't go through
-      // the Google SDK's getSignedUrl. If the branch logic flips, the
-      // URL would start with https://storage.googleapis.com instead.
+      // Emulator branch forms its own upload URL and never calls the
+      // Google SDK's getSignedUrl. If the branch logic flips, the URL
+      // would start with https://storage.googleapis.com instead.
       expect(put.url.startsWith("http://gcs-emulator:4443/upload/storage/v1/")).toBe(true);
       expect(put.method).toBe("POST");
     });
 
     it("falls back from PUBLIC_URL to HOST for the browser-facing URL when PUBLIC is unset", async () => {
-      // Dev convenience: in docker-compose we only set HOST; the
-      // adapter's `emulatorPublic ?? emulator` fallback means browsers
-      // get the same URL. A refactor that flips the operands or drops
-      // the fallback would silently break upload+download in dev; this
-      // test catches that by looking at the (public) upload URL the
-      // adapter forms.
+      // Dev convenience: docker-compose only sets HOST; the adapter's
+      // `emulatorPublic ?? emulator` fallback means browsers get the
+      // same URL. A refactor that flips the operands or drops the
+      // fallback would silently break upload+download in dev.
       process.env.STORAGE_EMULATOR_HOST = "http://gcs-emulator:4443";
-      // STORAGE_EMULATOR_PUBLIC_URL deliberately UNSET.
+      // STORAGE_EMULATOR_PUBLIC_URL deliberately UNSET (beforeEach).
       const { GCSAdapter } = await import("@cred/storage/object");
       const adapter = new GCSAdapter();
       const put = await adapter.putSignedUrl({
         key: "fac/mercy/packet.pdf",
         contentType: "application/pdf",
       });
-      // Direct-upload URL uses the public URL, which should've fallen
-      // back to HOST → starts with the HOST origin.
       expect(put.url.startsWith("http://gcs-emulator:4443/upload/storage/v1/")).toBe(true);
     });
   });
