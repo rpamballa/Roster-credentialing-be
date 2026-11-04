@@ -1,16 +1,13 @@
 import {
-  MagicLinkInvalidError,
   PasswordResetInvalidError,
   ProviderInviteInvalidError,
   attachProviderToInvite,
-  consumeMagicLink,
   consumePasswordReset,
   createSession,
   destroySession,
   ensureProviderAccount,
   hashPassword,
   hashProviderInviteToken,
-  issueMagicLink,
   passwordSchema,
   previewProviderInviteToken,
   redeemProviderInviteToken,
@@ -21,7 +18,6 @@ import {
 import { env } from "@cred/config";
 import { db, schema } from "@cred/db";
 import { audit, logger } from "@cred/observability";
-import { MagicLinkRequestSchema, MagicLinkVerifySchema } from "@cred/types";
 import { zValidator } from "@hono/zod-validator";
 import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -32,67 +28,14 @@ import type { ApiBindings } from "../types.js";
 
 export const authRoutes = new Hono<ApiBindings>();
 
-authRoutes.post(
-  "/auth/magic-link/request",
-  zValidator("json", MagicLinkRequestSchema),
-  async (c) => {
-    const { email, redirectPath } = c.req.valid("json");
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
-    await issueMagicLink({
-      email,
-      requestIp: ip,
-      ...(redirectPath !== undefined ? { redirectPath } : {}),
-    });
-    return c.json({ ok: true });
-  },
-);
-
-authRoutes.post("/auth/magic-link/verify", zValidator("json", MagicLinkVerifySchema), async (c) => {
-  const { token } = c.req.valid("json");
-  try {
-    const consumed = await consumeMagicLink(token);
-
-    // rls: bypass — pre-tenancy workspace lookup for the user.
-    const membership = await db()
-      .select({ workspaceId: schema.memberships.workspaceId })
-      .from(schema.memberships)
-      .where(eq(schema.memberships.userId, consumed.userId))
-      .limit(1);
-
-    const sid = await createSession({
-      userId: consumed.userId,
-      email: consumed.email,
-      activeWorkspaceId: membership[0]?.workspaceId ?? null,
-    });
-
-    setCookie(c, SESSION_COOKIE, sid, {
-      httpOnly: true,
-      secure: env().NODE_ENV === "production",
-      sameSite: "Lax",
-      path: "/",
-      maxAge: 30 * 24 * 60 * 60,
-    });
-
-    return c.json({
-      ok: true,
-      isNewUser: consumed.isNewUser,
-      redirectPath: consumed.redirectPath,
-    });
-  } catch (err) {
-    if (err instanceof MagicLinkInvalidError) {
-      return c.json(
-        {
-          type: "https://errors.cred/auth/invalid-token",
-          title: "Invalid or expired token",
-          status: 400,
-          instance: c.var.requestId,
-        },
-        400,
-      );
-    }
-    throw err;
-  }
-});
+// NOTE: /auth/magic-link/request and /auth/magic-link/verify were
+// removed in 2026-11. The flow upserted users without creating
+// providers, stranding anyone who signed in via a magic link
+// (shanthanramidi@gmail.com was the canonical case). Password auth
+// via /auth/password/login + /auth/password/reset is the sole
+// user-facing credential flow now. Case-scope and reference-scope
+// token flows are unchanged — they're purpose-specific and live in
+// packages/auth/src/case-access.ts and reference-access.ts.
 
 authRoutes.post("/auth/logout", async (c) => {
   const auth = c.var.auth;

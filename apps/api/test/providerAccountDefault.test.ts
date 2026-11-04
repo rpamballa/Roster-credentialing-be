@@ -167,6 +167,36 @@ describe("ensureProviderAccount — default-workspace fallback (product rule enf
     expect(rows.length).toBe(0);
   });
 
+  it("DB invariant: no users row has (no memberships AND no providers) — the orphan-user class the magic-link flow produced", async () => {
+    // The second invariant that migration 0020 enforces at the DB
+    // level. It's the exact bug class that stranded shanthan:
+    // magic-link upserted users rows without ever creating providers,
+    // leaving them invisible in Cockpit. A regression here means some
+    // code path creates a users row without also creating either a
+    // membership (staff) or a providers row (provider).
+    await seedWorkspace({
+      slug: "platform-default",
+      name: "Platform Default",
+      isPlatformDefault: true,
+    });
+    await ensureProviderAccount({
+      email: "legit@example.com",
+      fullName: "Legit User",
+    });
+
+    const result = await db().execute(sql`
+      SELECT u.id, u.email
+        FROM users u
+        LEFT JOIN memberships m ON m.user_id = u.id
+        LEFT JOIN providers p ON p.user_id = u.id
+       WHERE m.user_id IS NULL
+         AND p.user_id IS NULL
+         AND lower(u.email) <> 'info@rosterhealthcare.com'
+    `);
+    const rows = Array.isArray(result) ? result : ((result as { rows?: unknown[] }).rows ?? []);
+    expect(rows.length).toBe(0);
+  });
+
   it("DB invariant: at most one workspace is marked is_platform_default", async () => {
     // The unique partial index from migration 0019 enforces this at
     // the DB level — proving the invariant exists in schema, not just

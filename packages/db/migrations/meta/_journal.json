@@ -141,6 +141,13 @@
       "when": 1762194000000,
       "tag": "0019_default_workspace_and_provider_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1762200000000,
+      "tag": "0020_drop_magic_link_and_backfill_orphan_users",
+      "breakpoints": true
     }
   ]
 }

@@ -39,7 +39,9 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", healthRoutes);
 
   // Anonymous, abuse-prone endpoints are rate-limited per IP.
-  app.use("/auth/magic-link/*", rateLimit({ scope: "magic-link", windowSeconds: 60, max: 10 }));
+  // (/auth/magic-link/* was removed in 2026-11 — the flow stranded users
+  // by upserting the users row without creating a providers row.)
+  //
   // Password endpoints are the primary account-takeover surface; keep
   // the per-IP window tight. 10 attempts / minute is enough for a human
   // fat-fingering their password but not enough for online brute-force.

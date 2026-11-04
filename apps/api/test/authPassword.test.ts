@@ -21,14 +21,14 @@ const app = buildApp();
 
 /**
  * Password auth flow — login, password/set (invite redemption), reset
- * request + confirm, logout, workspace/switch, /auth/magic-link/*.
+ * request + confirm, logout, workspace/switch.
  *
- * These are all under the /auth/* rate limiter (10/min/IP for password
- * and magic-link scopes, 5/hour/IP for marketing). Each test uses a
- * unique X-Forwarded-For to keep the Redis buckets from bleeding
- * across cases.
+ * Under the /auth/password/* rate limiter (10/min/IP, 5/hour/IP for
+ * marketing). Each test uses a unique X-Forwarded-For to keep the
+ * Redis buckets from bleeding across cases. /auth/magic-link/* was
+ * removed in 2026-11 (it stranded users).
  */
-describe("/auth/password/* and /auth/magic-link/*", () => {
+describe("/auth/password/*", () => {
   beforeAll(async () => {
     await truncateAll(process.env.DATABASE_URL ?? "");
   });
