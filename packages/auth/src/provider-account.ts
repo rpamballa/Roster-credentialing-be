@@ -32,7 +32,15 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 export interface EnsureProviderAccountParams {
   email: string;
   fullName: string | null;
-  workspaceId: string;
+  /**
+   * Specific workspace to grant the provider to. Omit to fall back to
+   * the platform-default workspace — the product rule that every
+   * provider lands in at least one workspace, even when no caller
+   * supplied a specific one (grandfathered redeem paths, future
+   * self-service signup, admin tools that forgot to pass a workspace).
+   * See migration 0019.
+   */
+  workspaceId?: string;
   /** Actor who created the grant — for audit. Null for system/self-service. */
   grantedByUserId?: string | null;
 }
@@ -118,12 +126,19 @@ export async function ensureProviderAccount(
     providerCreated = true;
   }
 
+  // Resolve the workspace to grant into. An explicit workspaceId wins;
+  // otherwise fall back to the platform-default. Missing default is a
+  // configuration bug (migration 0019 should have set one), so it
+  // throws with a clear message rather than silently stranding the
+  // provider — the exact failure mode we're trying to prevent.
+  const workspaceId = params.workspaceId ?? (await getDefaultWorkspaceId());
+
   // rls: bypass — grants table IS the workspace-access check.
   const insertedGrant = await db()
     .insert(schema.providerWorkspaceGrants)
     .values({
       providerId,
-      workspaceId: params.workspaceId,
+      workspaceId,
       grantedBy: params.grantedByUserId ?? null,
     })
     .onConflictDoNothing()
@@ -136,6 +151,26 @@ export async function ensureProviderAccount(
     providerCreated,
     grantCreated: insertedGrant.length > 0,
   };
+}
+
+/**
+ * Returns the id of the workspace marked `is_platform_default`. Throws
+ * when no default is configured — a configuration bug, not a runtime
+ * condition any caller should recover from. Migration 0019 set the
+ * default in prod; dev and staging configure theirs via seed.
+ */
+export async function getDefaultWorkspaceId(): Promise<string> {
+  const [row] = await db()
+    .select({ id: schema.workspaces.id })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.isPlatformDefault, true))
+    .limit(1);
+  if (!row) {
+    throw new Error(
+      "No platform-default workspace configured. Run migration 0019 or set workspaces.is_platform_default on one row.",
+    );
+  }
+  return row.id;
 }
 
 function splitFullName(full: string | null): { firstName: string; lastName: string } {

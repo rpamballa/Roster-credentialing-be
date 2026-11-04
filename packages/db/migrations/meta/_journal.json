@@ -134,6 +134,13 @@
       "when": 1758759100000,
       "tag": "0018_marketing_leads_add_trial_kind",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1762194000000,
+      "tag": "0019_default_workspace_and_provider_backfill",
+      "breakpoints": true
     }
   ]
 }
