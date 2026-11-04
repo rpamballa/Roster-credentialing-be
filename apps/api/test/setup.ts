@@ -48,7 +48,6 @@ export async function truncateAll(url: string): Promise<void> {
     await sql.unsafe(`
       TRUNCATE
         audit_log,
-        magic_link_tokens,
         password_reset_tokens,
         marketing_leads,
         inbound_emails,

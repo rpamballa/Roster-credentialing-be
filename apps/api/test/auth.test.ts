@@ -13,9 +13,6 @@ const { ensureSchema, truncateAll } = await import("./setup.js");
 await ensureSchema(process.env.DATABASE_URL);
 
 const { buildApp } = await import("../src/app.js");
-const { hashToken } = await import("@cred/auth");
-const { db, schema } = await import("@cred/db");
-const { eq } = await import("drizzle-orm");
 const { closeDb } = await import("@cred/db");
 const { closeSessionStore } = await import("@cred/auth");
 
@@ -47,64 +44,25 @@ describe("api smoke", () => {
     expect(await res.json()).toEqual({ status: "ok" });
   });
 
-  it("magic-link request + verify produces a session, then /me works", async () => {
-    const reqRes = await call("POST", "/auth/magic-link/request", {
-      email: "user@example.com",
-    });
-    expect(reqRes.status).toBe(200);
+  // The magic-link request + verify tests were removed in 2026-11. The
+  // flow stranded users by upserting users rows without providers rows
+  // (shanthanramidi@gmail.com was the canonical case). /auth/magic-link/*
+  // no longer exists; the endpoints 404 and the magic_link_tokens table
+  // was dropped in migration 0020. Password auth is the only user-facing
+  // credential flow now.
 
-    // Find the issued token row directly — in dev/test, no email is sent.
-    const rows = await db()
-      .select()
-      .from(schema.magicLinkTokens)
-      .where(eq(schema.magicLinkTokens.email, "user@example.com"));
-    expect(rows.length).toBe(1);
+  it("/auth/magic-link/request is gone — returns 404", async () => {
+    const res = await call("POST", "/auth/magic-link/request", { email: "user@example.com" });
+    expect(res.status).toBe(404);
+  });
 
-    // We can't read the plaintext token back (we only stored the hash). So
-    // forge a valid token + hash here, insert it, and verify it.
-    const token = "test-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const hash = hashToken(token);
-    await db()
-      .update(schema.magicLinkTokens)
-      .set({ tokenHash: hash })
-      .where(eq(schema.magicLinkTokens.email, "user@example.com"));
-
-    const verifyRes = await call("POST", "/auth/magic-link/verify", { token });
-    expect(verifyRes.status).toBe(200);
-    const setCookie = verifyRes.headers.get("set-cookie") ?? "";
-    expect(setCookie).toBeTruthy();
-    const sid = setCookie.split(";")[0]?.split("=")[1] ?? "";
-    expect(sid).not.toBe("");
-
-    const meRes = await call("GET", "/me", undefined, {
-      cookie: `cred_sid=${sid}`,
-    });
-    expect(meRes.status).toBe(200);
-    const me = (await meRes.json()) as { email: string; memberships: unknown[] };
-    expect(me.email).toBe("user@example.com");
-    expect(me.memberships).toEqual([]);
+  it("/auth/magic-link/verify is gone — returns 404", async () => {
+    const res = await call("POST", "/auth/magic-link/verify", { token: "x".repeat(40) });
+    expect(res.status).toBe(404);
   });
 
   it("/me without a session is 401", async () => {
     const res = await call("GET", "/me");
     expect(res.status).toBe(401);
-  });
-
-  it("a consumed token cannot be reused", async () => {
-    const token = "single-use-token-bbbbbbbbbbbbbbbbbbbbbbbb";
-    const hash = hashToken(token);
-    await db()
-      .insert(schema.magicLinkTokens)
-      .values({
-        tokenHash: hash,
-        email: "single@example.com",
-        expiresAt: new Date(Date.now() + 60_000),
-      });
-
-    const first = await call("POST", "/auth/magic-link/verify", { token });
-    expect(first.status).toBe(200);
-
-    const second = await call("POST", "/auth/magic-link/verify", { token });
-    expect(second.status).toBe(400);
   });
 });

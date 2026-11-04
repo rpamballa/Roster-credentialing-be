@@ -1,16 +1,8 @@
-import { z } from "zod";
 import type { MembershipRole } from "../domain/enums.js";
 
-export const MagicLinkRequestSchema = z.object({
-  email: z.string().email().toLowerCase(),
-  redirectPath: z.string().startsWith("/").optional(),
-});
-export type MagicLinkRequest = z.infer<typeof MagicLinkRequestSchema>;
-
-export const MagicLinkVerifySchema = z.object({
-  token: z.string().min(32).max(256),
-});
-export type MagicLinkVerify = z.infer<typeof MagicLinkVerifySchema>;
+// Magic-link request/verify schemas were removed in 2026-11. The flow
+// stranded users (upserted users row without a providers row); password
+// auth is now the only user-facing credential flow.
 
 export interface MeResponse {
   userId: string;
