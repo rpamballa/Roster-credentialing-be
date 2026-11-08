@@ -4,6 +4,7 @@ import { db } from "../client.js";
 import {
   signalConversations,
   signalCredentials,
+  signalEvalRuns,
   signalExtracts,
   signalJobs,
   signalOverrides,
@@ -158,6 +159,11 @@ export interface SignalScoped {
     typeof signalWeights.$inferSelect,
     typeof signalWeights.$inferInsert
   >;
+  evalRuns: ScopedQuery<
+    typeof signalEvalRuns,
+    typeof signalEvalRuns.$inferSelect,
+    typeof signalEvalRuns.$inferInsert
+  >;
 }
 
 /**
@@ -184,5 +190,6 @@ export function withWorkspace(workspaceId: string, executor?: SignalExecutor): S
     overrides: makeScoped(exec, workspaceId, signalOverrides),
     sourceLineage: makeScoped(exec, workspaceId, signalSourceLineage),
     weights: makeScoped(exec, workspaceId, signalWeights),
+    evalRuns: makeScoped(exec, workspaceId, signalEvalRuns),
   };
 }

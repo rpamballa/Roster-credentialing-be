@@ -1,0 +1,9 @@
+{
+  "comment": "Signal eval precision baseline. First green CI run writes real numbers here via scripts/update-baseline.ts. Subsequent runs fail if meanPrecisionAtK drops by more than toleranceDrop. 'null' meanPrecisionAtK means no baseline has been recorded yet — the CI gate skips regression checks and only enforces the absolute threshold.",
+  "fixture": "known-reqs-v0.json",
+  "k": 3,
+  "meanPrecisionAtK": null,
+  "toleranceDrop": 0.02,
+  "updatedAt": null,
+  "recordedBy": null
+}

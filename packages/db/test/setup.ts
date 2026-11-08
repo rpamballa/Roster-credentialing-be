@@ -29,6 +29,7 @@ export async function truncateSignalTables(url: string): Promise<void> {
     // and are cleaned separately so tests can re-seed them.
     await sql.unsafe(`
       TRUNCATE
+        signal_eval_runs,
         signal_source_lineage,
         signal_overrides,
         signal_rankings,

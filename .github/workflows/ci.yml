@@ -1,11 +1,12 @@
 name: ci
 
-# Fires on every PR and on push to main. Both events run the same
-# jobs so branch-protection can gate merges on `quality`.
+# Fires on every PR and on push to main / signal/main. Both events
+# run the same jobs so branch-protection can gate merges on `quality`
+# (and on `signal-eval` for the Signal workstream).
 
 on:
   push:
-    branches: [main]
+    branches: [main, signal/main]
   pull_request:
 
 concurrency:
@@ -85,5 +86,80 @@ jobs:
         run: pnpm --filter @cred/db test
       - name: Vitest — @cred/signal-ingest (connector plane: readers, runner, gaps)
         run: pnpm --filter @cred/signal-ingest test
+      - name: Vitest — @cred/signal-eval (precision@K, leak probe, CLI gate)
+        run: pnpm --filter @cred/signal-eval test
       - name: Vitest — integration tests hit real Postgres + Redis + fake-gcs via services
         run: pnpm --filter @cred/api test
+
+  signal-eval:
+    # Signal eval harness: runs the full ranker against the pinned v0
+    # fixture and gates the merge on precision@3 >= threshold AND no
+    # regression > toleranceDrop from the committed baseline. Shares
+    # Postgres with `quality` (identical service config).
+    #
+    # v0 fixture carries ENGINEERING-PLACEHOLDER labels; the CLI logs
+    # a WARN banner on every run. Consultant-grade labels swap in
+    # before M10 prod promotion — see packages/signal-eval/README.md.
+    name: signal-eval
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: cred
+          POSTGRES_PASSWORD: cred
+          POSTGRES_DB: cred_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cred -d cred_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://cred:cred@localhost:5432/cred_test
+      REDIS_URL: redis://localhost:6379/1
+      SESSION_SECRET: ci-session-secret-1234567890
+      NODE_ENV: test
+      # The CLI run below is sandboxed — it seeds and runs against a
+      # throwaway workspace created on demand, so it doesn't need a
+      # pre-seeded one.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Migrate signal_* schema
+        run: pnpm --filter @cred/db migrate
+      - name: Vitest — @cred/signal-eval (precision@K, leak probe, CLI gate)
+        run: pnpm --filter @cred/signal-eval test
+      - name: Run signal-eval CLI against v0 fixture + baseline gate
+        # The CLI seeds its own throwaway workspace (created inline),
+        # runs the harness, and checks precision against the committed
+        # baseline + absolute threshold. A regression > toleranceDrop
+        # (default 0.02) fails the step; the baseline JSON is advanced
+        # only by the committed `update-baseline` script.
+        run: |
+          WORKSPACE_ID=$(node -e "
+            const postgres = require('postgres');
+            const sql = postgres(process.env.DATABASE_URL, { max: 1, prepare: false });
+            (async () => {
+              await sql\`TRUNCATE signal_eval_runs, signal_weights, signal_source_lineage, signal_overrides, signal_rankings, signal_extracts, signal_conversations, signal_credentials, signal_jobs, signal_providers, workspaces, users, facilities RESTART IDENTITY CASCADE\`;
+              const r = await sql\`INSERT INTO workspaces (type, name, slug) VALUES ('agency', 'eval-ci', 'eval-ci-\${Math.random().toString(16).slice(2, 8)}') RETURNING id\`;
+              console.log(r[0].id);
+              await sql.end({ timeout: 5 });
+            })().catch((e) => { console.error(e); process.exit(1); });
+          ")
+          echo "Using workspace: $WORKSPACE_ID"
+          pnpm --filter @cred/signal-eval eval -- \
+            --workspace "$WORKSPACE_ID" \
+            --fixture packages/signal-eval/fixtures/known-reqs-v0.json \
+            --baseline packages/signal-eval/fixtures/baseline.json \
+            --k 3 \
+            --threshold 0.70 \
+            --pretty
