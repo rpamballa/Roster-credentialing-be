@@ -18,3 +18,4 @@ export * from "./packets.js";
 export * from "./verifications.js";
 export * from "./ingestJobs.js";
 export * from "./marketingLeads.js";
+export * from "./signal/index.js";
