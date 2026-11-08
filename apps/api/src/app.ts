@@ -23,6 +23,7 @@ import { packetRoutes } from "./routes/packet.js";
 import { providerRoutes } from "./routes/provider.js";
 import { providerMeRoutes } from "./routes/providerMe.js";
 import { referenceRoutes } from "./routes/reference.js";
+import { signalRoutes } from "./routes/signal.js";
 import { supportRoutes } from "./routes/support.js";
 // 🧪 TEST API — only mounted when TEST_API_ENABLED=true (compose.test.yml).
 // See routes/testApi.ts for the double-gate.
@@ -77,6 +78,11 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", metricsRoutes);
   app.route("/", marketingLeadRoutes);
   app.route("/", supportRoutes);
+  // Roster Signal · WS A core engine. The kill-switch middleware above
+  // short-circuits these paths when SIGNAL_SERVICES_ENABLED is off or the
+  // tenant hasn't been whitelisted; the routes themselves only need to
+  // resolve the workspace from `c.var.auth`.
+  app.route("/", signalRoutes);
   if (process.env.TEST_API_ENABLED === "true") {
     // Mount the test-only /test/* routes behind the gate. Handlers
     // ALSO recheck the env on every request so the mount doesn't
