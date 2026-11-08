@@ -18,9 +18,11 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { db, schema } from "@cred/db";
 import { withWorkspace } from "@cred/db/signal";
-import { lineageForCanonical, recordLineage } from "@cred/db/signal";
+import type { ConsentApiTarget } from "@cred/db/signal";
+import { lineageForCanonical, recordLineage, validateConsentTransition } from "@cred/db/signal";
 import { logger } from "@cred/observability";
 import { loadFixture, runEval } from "@cred/signal-eval";
+import { runExtracts } from "@cred/signal-extracts";
 import { readWeights } from "@cred/signal-learn";
 import { rankJobCandidates, rankProviderOpenings } from "@cred/signal-match";
 import { zValidator } from "@hono/zod-validator";
@@ -361,13 +363,41 @@ signalRoutes.get("/v1/signal/reasons/:reason_id/source", async (c) => {
 
 // ─── POST /v1/signal/conversations/consent ────────────────────────────────
 //
-// Consent state update (grant/revoke). Signal cannot act on a thread
-// until the provider's consent state is `granted`; revoking a prior
-// consent preserves the history row for audit and future re-outreach.
+// Consent state update (grant / revoke / move to pending / clear).
+// The state machine itself lives in `@cred/db/signal` (consent.ts) so
+// the ranker and the ingest pipeline see the same rules — this
+// handler is a thin surface over it.
+//
+// Rules the surface enforces:
+//
+//   - `implied_outbound` rows are frozen (ingest-only). The handler
+//     refuses to flip them; see `validateConsentTransition`.
+//   - The addressable target set excludes `implied_outbound` for the
+//     same reason — there is no consent event that moves a row INTO
+//     that state from outside ingest.
+//   - On a successful `revoked` transition, we also null the body
+//     column so the stored copy of the content vanishes; occurred_at,
+//     channel, and lineage stay so audit can still show "a thread
+//     existed here, these were the headers, the body is gone". The
+//     ranker's extract-filter (see `extractsForWorkspace`) joins back
+//     to the conversation's consent_state, so no extra write to
+//     `signal_extracts` is needed here.
 const ConsentBody = z.object({
   conversationId: z.string().uuid(),
+  // Mirror of `ConsentApiTarget` in @cred/db/signal. The type-level
+  // assertion below fails the build if the two drift.
   state: z.enum(["granted", "revoked", "pending", "unknown"]),
 });
+// Compile-time guard: the Zod enum equals the state machine's
+// addressable target set. If `ConsentApiTarget` grows a new member
+// the TS error here forces us to teach the Zod enum.
+type _ConsentApiTargetsMatch = ConsentApiTarget extends z.infer<typeof ConsentBody>["state"]
+  ? z.infer<typeof ConsentBody>["state"] extends ConsentApiTarget
+    ? true
+    : never
+  : never;
+const _consentApiTargetsMatch: _ConsentApiTargetsMatch = true;
+void _consentApiTargetsMatch;
 
 signalRoutes.post(
   "/v1/signal/conversations/consent",
@@ -375,10 +405,51 @@ signalRoutes.post(
   async (c) => {
     const { workspaceId } = c.var.signalTenancy;
     const body = c.req.valid("json");
+    const nextState = body.state;
+
+    // Load the current state first so the transition check can act on
+    // it. A single row lookup → keeps us on one round-trip + one
+    // conditional update when the transition is legal.
+    const existing = await db()
+      .select({
+        id: schema.signalConversations.id,
+        consentState: schema.signalConversations.consentState,
+      })
+      .from(schema.signalConversations)
+      .where(
+        and(
+          eq(schema.signalConversations.workspaceId, workspaceId),
+          eq(schema.signalConversations.id, body.conversationId),
+        ),
+      )
+      .limit(1);
+    const prior = existing[0];
+    if (!prior) return notFound(c);
+
+    const err = validateConsentTransition(prior.consentState, nextState);
+    if (err) {
+      return c.json(
+        {
+          type: `https://errors.cred/signal/consent/${err.code}`,
+          title: "Consent transition refused",
+          status: 409,
+          detail: err.detail,
+          instance: c.var.requestId,
+        },
+        409,
+      );
+    }
+
+    // Revoke → null the body as part of the same write. Non-revoked
+    // transitions leave the body untouched.
+    const setExpr: Partial<typeof schema.signalConversations.$inferInsert> = {
+      consentState: nextState,
+    };
+    if (nextState === "revoked") setExpr.body = null;
 
     const updated = await db()
       .update(schema.signalConversations)
-      .set({ consentState: body.state })
+      .set(setExpr)
       .where(
         and(
           eq(schema.signalConversations.workspaceId, workspaceId),
@@ -392,6 +463,7 @@ signalRoutes.post(
     return c.json({
       conversationId: row.id,
       consentState: row.consentState,
+      bodyPresent: row.body !== null,
     });
   },
 );
@@ -520,6 +592,30 @@ signalRoutes.post("/v1/signal/eval/runs", zValidator("json", EvalBody), async (c
     },
     201,
   );
+});
+
+// ─── POST /v1/signal/extracts/run ─────────────────────────────────────────
+//
+// Dev trigger for the extract pipeline. In prod WS G will run this on
+// an hourly cron (not yet wired — see WS E deliverables doc), so for
+// now a recruiter can hit this endpoint to re-extract after a batch
+// of outreach. The handler returns the extract summary so the cockpit
+// can show "+N facets written" immediately.
+//
+// Idempotent: a re-run against unchanged conversation bodies inserts
+// zero rows (the migration adds a partial unique index on
+// (conversation_id, facet, source_span.start) that the runner relies
+// on via ON CONFLICT DO NOTHING).
+signalRoutes.post("/v1/signal/extracts/run", async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const result = await runExtracts({ workspaceId });
+  return c.json({
+    workspaceId,
+    conversationsProcessed: result.conversationsProcessed,
+    extractsInserted: result.extractsInserted,
+    extractsSkipped: result.extractsSkipped,
+    bodiesHidden: result.bodiesHidden,
+  });
 });
 
 // ─── POST /v1/signal/ingest/:adapter/webhook ──────────────────────────────

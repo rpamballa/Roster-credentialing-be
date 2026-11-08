@@ -14,10 +14,12 @@ export * from "./adapters/types.js";
 export {
   ROSTER_INTERNAL_SYSTEM,
   countCases,
+  readCaseNotes,
   readConversations,
   readCredentials,
   readFacilities,
   readJobs,
+  readOutboundEmails,
   readProviders,
   rosterInternalAdapter,
   validateFacilityReferences,

@@ -50,6 +50,7 @@ import {
 } from "@cred/db/schema";
 import { recordLineage, resolveProvider, withWorkspace } from "@cred/db/signal";
 import { CircuitOpenError, createCircuitBreaker } from "@cred/signal-core";
+import { type RunExtractsSummary, runExtracts } from "@cred/signal-extracts";
 import { and, eq, sql } from "drizzle-orm";
 import type {
   ConversationRecord,
@@ -80,6 +81,12 @@ export interface IngestSummary {
   rowsSkipped: Record<string, number>;
   errors: ReaderError[];
   gaps: IngestGap[];
+  /**
+   * Result of the post-ingest extract fan-out. Null when the extract
+   * pass was disabled via `runExtracts: false` on the options, or
+   * when every adapter errored out before we got that far.
+   */
+  extractsRun: RunExtractsSummary | null;
 }
 
 export interface RunIngestOnceOptions {
@@ -103,6 +110,15 @@ export interface RunIngestOnceOptions {
   windowSize?: number;
   /** Clock injection for tests. */
   now?: () => number;
+  /**
+   * When `false`, skip the post-ingest fan-out to
+   * `@cred/signal-extracts`. Default is `true` — a fresh workspace
+   * sync always re-runs extracts so a newly-pulled conversation
+   * becomes rankable in the same cycle. Tests that want to assert on
+   * conversation rows without the extract pipeline also writing can
+   * set this to `false`.
+   */
+  runExtracts?: boolean;
 }
 
 type ReaderName = "providers" | "jobs" | "facilities" | "credentials" | "conversations";
@@ -129,6 +145,7 @@ export async function runIngestOnce(opts: RunIngestOnceOptions): Promise<IngestS
     rowsSkipped: zeroCounters(),
     errors: [],
     gaps: [],
+    extractsRun: null,
   };
 
   for (const adapter of adapters) {
@@ -205,6 +222,14 @@ export async function runIngestOnce(opts: RunIngestOnceOptions): Promise<IngestS
     });
   }
 
+  // Post-ingest extract fan-out. Runs after every adapter so a
+  // conversation written in this cycle becomes immediately rankable.
+  // Stays inside the same `workspaceId` scope the ingest ran under,
+  // so cross-tenant leaks are impossible from this path.
+  if (opts.runExtracts !== false) {
+    summary.extractsRun = await runExtracts({ workspaceId });
+  }
+
   return summary;
 }
 
@@ -249,6 +274,7 @@ export function makeRunnerWithBreakers(
       rowsSkipped: zeroCounters(),
       errors: [],
       gaps: [],
+      extractsRun: null,
     };
     const ctx: ReaderContext = { workspaceId };
 
@@ -548,6 +574,11 @@ async function upsertConversation(
         channel: rec.channel,
         occurredAt: rec.occurredAt,
         ...(rec.summary !== undefined ? { summary: rec.summary } : {}),
+        // `body` only overwrites when the reader sends one — a later
+        // sync that doesn't carry text doesn't erase the stored copy.
+        // A revoke event erases body via the consent handler, not
+        // through this path.
+        ...(rec.body !== undefined ? { body: rec.body } : {}),
         ...(rec.consentState !== undefined ? { consentState: rec.consentState } : {}),
         ...(rec.sourceRef !== undefined ? { sourceRef: rec.sourceRef } : {}),
       })
@@ -570,6 +601,7 @@ async function upsertConversation(
     channel: rec.channel,
     occurredAt: rec.occurredAt,
     ...(rec.summary !== undefined ? { summary: rec.summary } : {}),
+    ...(rec.body !== undefined ? { body: rec.body } : {}),
     ...(rec.consentState !== undefined ? { consentState: rec.consentState } : {}),
     ...(rec.sourceRef !== undefined ? { sourceRef: rec.sourceRef } : {}),
   });

@@ -98,6 +98,12 @@ export interface ConversationRecord {
   channel: string;
   occurredAt: Date;
   summary?: string | undefined;
+  /**
+   * Full normalized text of the conversation touch. Written to
+   * `signal_conversations.body` and used by the extracts pipeline as
+   * the stable substrate for character offsets.
+   */
+  body?: string | undefined;
   consentState?: string | undefined;
   sourceRef?: Record<string, unknown> | undefined;
   source: SourceRef;

@@ -20,6 +20,7 @@
     "@cred/db": "workspace:*",
     "@cred/signal-core": "workspace:*",
     "@cred/signal-cred-bridge": "workspace:*",
+    "@cred/signal-extracts": "workspace:*",
     "drizzle-orm": "0.36.4"
   },
   "devDependencies": {

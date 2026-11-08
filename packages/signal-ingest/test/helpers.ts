@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { db } from "@cred/db";
 import {
+  caseNotes,
   cases,
   facilities,
   facilityProfiles,
@@ -123,6 +124,25 @@ export async function seedVerification(opts: {
       status: opts.status ?? "active",
       verifiedAt: new Date(),
     });
+}
+
+export async function seedCaseNote(opts: {
+  workspaceId: string;
+  caseId: string;
+  body: string;
+  deletedAt?: Date | null;
+}): Promise<string> {
+  const [row] = await db()
+    .insert(caseNotes)
+    .values({
+      workspaceId: opts.workspaceId,
+      caseId: opts.caseId,
+      body: opts.body,
+      ...(opts.deletedAt !== undefined ? { deletedAt: opts.deletedAt } : {}),
+    })
+    .returning({ id: caseNotes.id });
+  if (!row) throw new Error("case note insert failed");
+  return row.id;
 }
 
 export async function seedOutreachEmail(opts: {
