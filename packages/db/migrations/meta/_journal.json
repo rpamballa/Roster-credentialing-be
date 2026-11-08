@@ -162,6 +162,13 @@
       "when": 1762531260000,
       "tag": "0022_signal_canonical",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1762531320000,
+      "tag": "0023_signal_weights",
+      "breakpoints": true
     }
   ]
 }

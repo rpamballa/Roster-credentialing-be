@@ -10,6 +10,7 @@ import {
   signalProviders,
   signalRankings,
   signalSourceLineage,
+  signalWeights,
 } from "../schema/signal/index.js";
 import type { SignalExecutor } from "./lineage.js";
 
@@ -152,6 +153,11 @@ export interface SignalScoped {
     typeof signalSourceLineage.$inferSelect,
     typeof signalSourceLineage.$inferInsert
   >;
+  weights: ScopedQuery<
+    typeof signalWeights,
+    typeof signalWeights.$inferSelect,
+    typeof signalWeights.$inferInsert
+  >;
 }
 
 /**
@@ -177,5 +183,6 @@ export function withWorkspace(workspaceId: string, executor?: SignalExecutor): S
     rankings: makeScoped(exec, workspaceId, signalRankings),
     overrides: makeScoped(exec, workspaceId, signalOverrides),
     sourceLineage: makeScoped(exec, workspaceId, signalSourceLineage),
+    weights: makeScoped(exec, workspaceId, signalWeights),
   };
 }

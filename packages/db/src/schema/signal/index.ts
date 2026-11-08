@@ -6,3 +6,4 @@ export * from "./extracts.js";
 export * from "./rankings.js";
 export * from "./overrides.js";
 export * from "./sourceLineage.js";
+export * from "./weights.js";

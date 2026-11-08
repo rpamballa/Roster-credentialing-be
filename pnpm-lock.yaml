@@ -44,6 +44,18 @@ importers:
       '@cred/observability':
         specifier: workspace:*
         version: link:../../packages/observability
+      '@cred/signal-cred-bridge':
+        specifier: workspace:*
+        version: link:../../packages/signal-cred-bridge
+      '@cred/signal-explain':
+        specifier: workspace:*
+        version: link:../../packages/signal-explain
+      '@cred/signal-learn':
+        specifier: workspace:*
+        version: link:../../packages/signal-learn
+      '@cred/signal-match':
+        specifier: workspace:*
+        version: link:../../packages/signal-match
       '@cred/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -314,6 +326,56 @@ importers:
         version: 2.1.8(@types/node@22.10.2)(terser@5.47.1)
 
   packages/signal-cred-bridge:
+    devDependencies:
+      typescript:
+        specifier: 5.7.2
+        version: 5.7.2
+      vitest:
+        specifier: 2.1.8
+        version: 2.1.8(@types/node@22.10.2)(terser@5.47.1)
+
+  packages/signal-explain:
+    devDependencies:
+      typescript:
+        specifier: 5.7.2
+        version: 5.7.2
+      vitest:
+        specifier: 2.1.8
+        version: 2.1.8(@types/node@22.10.2)(terser@5.47.1)
+
+  packages/signal-learn:
+    dependencies:
+      '@cred/db':
+        specifier: workspace:*
+        version: link:../db
+      '@cred/signal-explain':
+        specifier: workspace:*
+        version: link:../signal-explain
+      drizzle-orm:
+        specifier: 0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.0)(@types/pg@8.6.1)(postgres@3.4.5)
+    devDependencies:
+      typescript:
+        specifier: 5.7.2
+        version: 5.7.2
+      vitest:
+        specifier: 2.1.8
+        version: 2.1.8(@types/node@22.10.2)(terser@5.47.1)
+
+  packages/signal-match:
+    dependencies:
+      '@cred/db':
+        specifier: workspace:*
+        version: link:../db
+      '@cred/signal-cred-bridge':
+        specifier: workspace:*
+        version: link:../signal-cred-bridge
+      '@cred/signal-explain':
+        specifier: workspace:*
+        version: link:../signal-explain
+      drizzle-orm:
+        specifier: 0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.0)(@types/pg@8.6.1)(postgres@3.4.5)
     devDependencies:
       typescript:
         specifier: 5.7.2
