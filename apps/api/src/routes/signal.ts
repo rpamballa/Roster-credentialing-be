@@ -15,10 +15,12 @@
 // of the review checklist.
 
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { db, schema } from "@cred/db";
 import { withWorkspace } from "@cred/db/signal";
 import { lineageForCanonical, recordLineage } from "@cred/db/signal";
 import { logger } from "@cred/observability";
+import { loadFixture, runEval } from "@cred/signal-eval";
 import { readWeights } from "@cred/signal-learn";
 import { rankJobCandidates, rankProviderOpenings } from "@cred/signal-match";
 import { zValidator } from "@hono/zod-validator";
@@ -26,6 +28,13 @@ import { and, desc, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type { ApiBindings } from "../types.js";
+
+// Default eval fixture resolves relative to this file at build time
+// so it survives bundling and tsx runs alike. The path is a package
+// path under the monorepo root; the API process only ever reads it.
+const DEFAULT_EVAL_FIXTURE_PATH = fileURLToPath(
+  new URL("../../../../packages/signal-eval/fixtures/known-reqs-v0.json", import.meta.url),
+);
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -389,20 +398,40 @@ signalRoutes.post(
 
 // ─── POST /v1/signal/eval/runs ────────────────────────────────────────────
 //
-// Eval harness enqueue. For v0 we record the request as a conversation
-// row of channel="eval" so there's a durable queue to drain; WS G will
-// wire a worker against that same `kind` filter. Keeping the enqueue in
-// `signal_conversations` avoids shipping a new table for a stub.
+// Eval harness execution. The route:
+//
+//   1. Records an audit `signal_conversations` row of channel="eval"
+//      (same shape WS A's stub shipped, so existing drainers still see
+//      it).
+//   2. Loads the committed v0 fixture (or a caller-supplied fixture
+//      path when the request body names one), seeds the current
+//      workspace, runs the harness, writes the report into a
+//      `signal_eval_runs` row, and returns the aggregate.
+//
+// Seeding into a live workspace is irreversible — we gate the route
+// on `allowSeeding: true` in the body so a cockpit user can't nuke a
+// real workspace's providers by accident. The intended caller is the
+// dev workspace `roster-hc-beta`, same as the CI eval run.
+//
+// Fixture label-source clarity: when a placeholder fixture is used,
+// we write `label_source = "placeholder-engineering-judgment"` into
+// the row so later reads know this run is NOT consultant-grade.
 const EvalBody = z.object({
   suite: z.string().min(1).max(200),
   notes: z.string().max(2000).optional(),
+  /** Absolute path to a fixture JSON on the API server. Defaults to the v0 fixture. */
+  fixturePath: z.string().max(2048).optional(),
+  k: z.number().int().min(1).max(50).optional(),
+  /** Explicit opt-in to SEED the workspace with fixture data. Default false (dry report). */
+  allowSeeding: z.boolean().optional(),
 });
 
 signalRoutes.post("/v1/signal/eval/runs", zValidator("json", EvalBody), async (c) => {
   const { workspaceId } = c.var.signalTenancy;
   const body = c.req.valid("json");
 
-  const [row] = await db()
+  // 1. Audit conversation row (same as WS A's stub).
+  const [conversationRow] = await db()
     .insert(schema.signalConversations)
     .values({
       workspaceId,
@@ -417,13 +446,79 @@ signalRoutes.post("/v1/signal/eval/runs", zValidator("json", EvalBody), async (c
     })
     .returning();
 
+  if (!body.allowSeeding) {
+    // Without opt-in we DO NOT touch the workspace's rows. The caller
+    // gets the conversation id back so they can wire their own drainer.
+    return c.json(
+      {
+        runId: conversationRow?.id ?? null,
+        suite: body.suite,
+        status: "queued",
+        message:
+          "Set allowSeeding: true to run the harness synchronously. Without it the route stays an enqueue-only audit trail.",
+      },
+      202,
+    );
+  }
+
+  // 2. Drain: load fixture, seed, run harness, persist report.
+  const fixturePath = body.fixturePath ?? DEFAULT_EVAL_FIXTURE_PATH;
+  const fixture = loadFixture(fixturePath);
+  const startedAt = new Date();
+  const result = await runEval({
+    workspaceId,
+    fixture,
+    ...(body.k !== undefined ? { k: body.k } : {}),
+  });
+  const completedAt = new Date();
+
+  const [evalRow] = await db()
+    .insert(schema.signalEvalRuns)
+    .values({
+      workspaceId,
+      conversationId: conversationRow?.id ?? null,
+      suite: body.suite,
+      fixture: fixturePath,
+      labelSource: result.labelSource,
+      k: result.k,
+      status: "completed",
+      meanPrecisionAtK: result.aggregate.meanPrecisionAtK.toFixed(4),
+      passedCount: result.aggregate.passedCount,
+      failedCount: result.aggregate.failedCount,
+      aggregate: {
+        meanPrecisionAtK: result.aggregate.meanPrecisionAtK,
+        passedCount: result.aggregate.passedCount,
+        failedCount: result.aggregate.failedCount,
+      },
+      perReq: result.perReq.map((r) => ({
+        reqId: r.reqId,
+        precisionAtK: r.precisionAtK,
+        rankerTop: r.rankerTop,
+        expectedTop: r.expectedTop,
+        hits: r.hits,
+        misses: r.misses,
+        reasonsMatched: r.reasonsMatched,
+      })),
+      startedAt,
+      completedAt,
+    })
+    .returning();
+
   return c.json(
     {
-      runId: row?.id ?? null,
+      runId: evalRow?.id ?? null,
+      conversationId: conversationRow?.id ?? null,
       suite: body.suite,
-      status: "queued",
+      status: "completed",
+      fixture: fixturePath,
+      labelSource: result.labelSource,
+      isPlaceholder: result.isPlaceholder,
+      k: result.k,
+      aggregate: result.aggregate,
+      startedAt: startedAt.toISOString(),
+      completedAt: completedAt.toISOString(),
     },
-    202,
+    201,
   );
 });
 

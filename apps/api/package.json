@@ -18,6 +18,7 @@
     "@cred/db": "workspace:*",
     "@cred/observability": "workspace:*",
     "@cred/signal-cred-bridge": "workspace:*",
+    "@cred/signal-eval": "workspace:*",
     "@cred/signal-explain": "workspace:*",
     "@cred/signal-learn": "workspace:*",
     "@cred/signal-match": "workspace:*",

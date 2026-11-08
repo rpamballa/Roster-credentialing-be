@@ -1,0 +1,353 @@
+{
+  "fixture_version": "v0",
+  "pilot_specialty": "locum-tenens-anesthesiology",
+  "label_source": "placeholder-engineering-judgment",
+  "label_source_note": "v0 labels are engineering placeholders. CONSULTANT-grade labels swap in before M10 prod promotion. The CLI's --require-consultant-labels flag refuses to run against this file (by design) and the harness logs a WARN banner on every run that uses it. See packages/signal-eval/README.md for the promotion workflow.",
+  "provider_identifier_convention": "Picks are synthetic NPIs of the form 'synthetic-anesthesia-XXX'. The harness seeds providers keyed by this value in the eval workspace before running the ranker.",
+  "sub_specialty_distribution": {
+    "cardiac": 5,
+    "ob": 5,
+    "pediatric": 5,
+    "pain": 5,
+    "general": 5
+  },
+  "reqs": [
+    {
+      "reqId": "req-cardiac-01",
+      "facilityState": "MA",
+      "subSpecialty": "cardiac",
+      "needDate": "2026-02-15",
+      "payRange": [2000, 2400],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-001",
+        "synthetic-anesthesia-002",
+        "synthetic-anesthesia-003",
+        "synthetic-anesthesia-004"
+      ],
+      "rationale": "Cardiac anesthesia specialty required; all four picks have active MA state license + board cert + cardiac sub-specialty and are available by need date. 001 and 002 are compact-eligible if MA expands."
+    },
+    {
+      "reqId": "req-cardiac-02",
+      "facilityState": "TX",
+      "subSpecialty": "cardiac",
+      "needDate": "2026-03-01",
+      "payRange": [2100, 2500],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-002",
+        "synthetic-anesthesia-005",
+        "synthetic-anesthesia-006"
+      ],
+      "rationale": "TX non-compact — only providers with active TX state license and cardiac sub-specialty score high. 002 has worked recent cardiac rotations in TX per availability_hint."
+    },
+    {
+      "reqId": "req-cardiac-03",
+      "facilityState": "CA",
+      "subSpecialty": "cardiac",
+      "needDate": "2026-04-10",
+      "payRange": [2200, 2800],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-001",
+        "synthetic-anesthesia-006",
+        "synthetic-anesthesia-007",
+        "synthetic-anesthesia-008"
+      ],
+      "rationale": "CA non-compact and privileging-heavy; picks all carry active CA licenses already. 007 and 008 are high-volume cardiac operators."
+    },
+    {
+      "reqId": "req-cardiac-04",
+      "facilityState": "PA",
+      "subSpecialty": "cardiac",
+      "needDate": "2026-02-28",
+      "payRange": [1900, 2300],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-003",
+        "synthetic-anesthesia-004",
+        "synthetic-anesthesia-005"
+      ],
+      "rationale": "PA is IMLC-compact; picks hold compact-eligible status or active PA license and fit the need date with slack."
+    },
+    {
+      "reqId": "req-cardiac-05",
+      "facilityState": "IL",
+      "subSpecialty": "cardiac",
+      "needDate": "2026-05-15",
+      "payRange": [2000, 2400],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-002",
+        "synthetic-anesthesia-007",
+        "synthetic-anesthesia-008",
+        "synthetic-anesthesia-009"
+      ],
+      "rationale": "IL compact-state; need date is comfortably far so credential churn is not binding. 009 is a late-cycle backup pick with pending IL CSR projected clear by late April."
+    },
+    {
+      "reqId": "req-ob-01",
+      "facilityState": "NY",
+      "subSpecialty": "ob",
+      "needDate": "2026-02-10",
+      "payRange": [1800, 2200],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-010",
+        "synthetic-anesthesia-011",
+        "synthetic-anesthesia-012"
+      ],
+      "rationale": "OB anesthesia need in NY; picks carry active NY license + OB sub-specialty. 010 has NYU hospital privileges already projected."
+    },
+    {
+      "reqId": "req-ob-02",
+      "facilityState": "FL",
+      "subSpecialty": "ob",
+      "needDate": "2026-03-05",
+      "payRange": [1700, 2100],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-011",
+        "synthetic-anesthesia-013",
+        "synthetic-anesthesia-014",
+        "synthetic-anesthesia-015"
+      ],
+      "rationale": "FL non-compact; all four have active FL license and OB sub-specialty. 013 and 014 are in-state locums who prefer FL."
+    },
+    {
+      "reqId": "req-ob-03",
+      "facilityState": "WA",
+      "subSpecialty": "ob",
+      "needDate": "2026-03-20",
+      "payRange": [1900, 2300],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-010",
+        "synthetic-anesthesia-012",
+        "synthetic-anesthesia-013"
+      ],
+      "rationale": "WA compact-state; picks are compact-eligible or have active WA license and OB sub-specialty match."
+    },
+    {
+      "reqId": "req-ob-04",
+      "facilityState": "GA",
+      "subSpecialty": "ob",
+      "needDate": "2026-04-18",
+      "payRange": [1800, 2200],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-014",
+        "synthetic-anesthesia-015",
+        "synthetic-anesthesia-016",
+        "synthetic-anesthesia-017"
+      ],
+      "rationale": "GA compact-state; picks' credentials project clear well before need date. 016 and 017 are southern-region preferences."
+    },
+    {
+      "reqId": "req-ob-05",
+      "facilityState": "MN",
+      "subSpecialty": "ob",
+      "needDate": "2026-05-01",
+      "payRange": [1950, 2350],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-010",
+        "synthetic-anesthesia-011",
+        "synthetic-anesthesia-015"
+      ],
+      "rationale": "MN compact-state, high-volume OB center. Picks have active MN license (010, 011) or compact-eligibility (015) and OB sub-specialty."
+    },
+    {
+      "reqId": "req-peds-01",
+      "facilityState": "OH",
+      "subSpecialty": "pediatric",
+      "needDate": "2026-02-20",
+      "payRange": [2000, 2500],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-018",
+        "synthetic-anesthesia-019",
+        "synthetic-anesthesia-020"
+      ],
+      "rationale": "OH compact-state; peds anesthesia is a narrow pool — picks are the three in-network providers with active peds sub-specialty."
+    },
+    {
+      "reqId": "req-peds-02",
+      "facilityState": "NC",
+      "subSpecialty": "pediatric",
+      "needDate": "2026-03-12",
+      "payRange": [2000, 2400],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-019",
+        "synthetic-anesthesia-021",
+        "synthetic-anesthesia-022"
+      ],
+      "rationale": "NC not currently compact; picks hold active NC license and peds sub-specialty, projected ready by need date."
+    },
+    {
+      "reqId": "req-peds-03",
+      "facilityState": "CO",
+      "subSpecialty": "pediatric",
+      "needDate": "2026-04-05",
+      "payRange": [2100, 2600],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-018",
+        "synthetic-anesthesia-020",
+        "synthetic-anesthesia-022",
+        "synthetic-anesthesia-023"
+      ],
+      "rationale": "CO compact-state, high mountain-region demand; picks match on peds sub-specialty and region_pref includes W/MW."
+    },
+    {
+      "reqId": "req-peds-04",
+      "facilityState": "WI",
+      "subSpecialty": "pediatric",
+      "needDate": "2026-05-10",
+      "payRange": [1950, 2350],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-019",
+        "synthetic-anesthesia-021",
+        "synthetic-anesthesia-023",
+        "synthetic-anesthesia-024"
+      ],
+      "rationale": "WI compact-state; picks are compact-eligible, peds-subspecialty, and have ample slack to clear facility privileging by need date."
+    },
+    {
+      "reqId": "req-peds-05",
+      "facilityState": "AZ",
+      "subSpecialty": "pediatric",
+      "needDate": "2026-03-28",
+      "payRange": [2050, 2450],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-018",
+        "synthetic-anesthesia-022",
+        "synthetic-anesthesia-024"
+      ],
+      "rationale": "AZ compact-state; picks are the three peds-sub-specialty providers with active or compact-eligible AZ licensure and SW region_pref."
+    },
+    {
+      "reqId": "req-pain-01",
+      "facilityState": "TN",
+      "subSpecialty": "pain",
+      "needDate": "2026-02-25",
+      "payRange": [1800, 2200],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-025",
+        "synthetic-anesthesia-026",
+        "synthetic-anesthesia-027"
+      ],
+      "rationale": "TN compact-state, pain-management need; picks hold active pain sub-specialty and DEA with in-state CSR."
+    },
+    {
+      "reqId": "req-pain-02",
+      "facilityState": "UT",
+      "subSpecialty": "pain",
+      "needDate": "2026-03-15",
+      "payRange": [1900, 2300],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-026",
+        "synthetic-anesthesia-028",
+        "synthetic-anesthesia-029"
+      ],
+      "rationale": "UT compact-state; picks' DEA + UT CSR project clear, pain sub-specialty active."
+    },
+    {
+      "reqId": "req-pain-03",
+      "facilityState": "MD",
+      "subSpecialty": "pain",
+      "needDate": "2026-04-22",
+      "payRange": [1950, 2350],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-025",
+        "synthetic-anesthesia-027",
+        "synthetic-anesthesia-029",
+        "synthetic-anesthesia-030"
+      ],
+      "rationale": "MD compact-state; picks have MD license + CSR projected clear and pain sub-specialty."
+    },
+    {
+      "reqId": "req-pain-04",
+      "facilityState": "MI",
+      "subSpecialty": "pain",
+      "needDate": "2026-05-20",
+      "payRange": [1850, 2250],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-026",
+        "synthetic-anesthesia-028",
+        "synthetic-anesthesia-030"
+      ],
+      "rationale": "MI compact-state; picks' pain sub-specialty and controlled-substance paperwork project ready well ahead of need date."
+    },
+    {
+      "reqId": "req-pain-05",
+      "facilityState": "IA",
+      "subSpecialty": "pain",
+      "needDate": "2026-06-01",
+      "payRange": [1800, 2200],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-025",
+        "synthetic-anesthesia-027",
+        "synthetic-anesthesia-028",
+        "synthetic-anesthesia-029"
+      ],
+      "rationale": "IA compact-state, generous need date; picks are all pain sub-specialty and compact-eligible with no binding credential gap."
+    },
+    {
+      "reqId": "req-general-01",
+      "facilityState": "ME",
+      "subSpecialty": "general",
+      "needDate": "2026-02-18",
+      "payRange": [1700, 2000],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-031",
+        "synthetic-anesthesia-032",
+        "synthetic-anesthesia-033"
+      ],
+      "rationale": "ME compact-state; picks are general anesthesia locums with MA/ME license and compact-eligibility."
+    },
+    {
+      "reqId": "req-general-02",
+      "facilityState": "NE",
+      "subSpecialty": "general",
+      "needDate": "2026-03-25",
+      "payRange": [1700, 2000],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-032",
+        "synthetic-anesthesia-034",
+        "synthetic-anesthesia-035"
+      ],
+      "rationale": "NE compact-state; picks hold general sub-specialty and have compact-eligible licensure projecting ready before need date."
+    },
+    {
+      "reqId": "req-general-03",
+      "facilityState": "NV",
+      "subSpecialty": "general",
+      "needDate": "2026-04-15",
+      "payRange": [1750, 2100],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-031",
+        "synthetic-anesthesia-033",
+        "synthetic-anesthesia-035",
+        "synthetic-anesthesia-036"
+      ],
+      "rationale": "NV compact-state; picks fit general sub-specialty and have active NV license or compact-eligible status."
+    },
+    {
+      "reqId": "req-general-04",
+      "facilityState": "KY",
+      "subSpecialty": "general",
+      "needDate": "2026-05-05",
+      "payRange": [1700, 2050],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-032",
+        "synthetic-anesthesia-034",
+        "synthetic-anesthesia-036",
+        "synthetic-anesthesia-037"
+      ],
+      "rationale": "KY compact-state; picks have general sub-specialty and projected binding credential clear by late April."
+    },
+    {
+      "reqId": "req-general-05",
+      "facilityState": "SD",
+      "subSpecialty": "general",
+      "needDate": "2026-06-12",
+      "payRange": [1700, 2000],
+      "placeholderTopPicks": [
+        "synthetic-anesthesia-031",
+        "synthetic-anesthesia-033",
+        "synthetic-anesthesia-035",
+        "synthetic-anesthesia-037"
+      ],
+      "rationale": "SD compact-state; generous need date, picks all general sub-specialty with no binding credential."
+    }
+  ]
+}

@@ -34,6 +34,7 @@ async function clearAll(): Promise<void> {
   try {
     await sql.unsafe(`
       TRUNCATE
+        signal_eval_runs,
         signal_weights,
         signal_overrides,
         signal_rankings,
