@@ -111,6 +111,36 @@ const EnvSchema = z.object({
   // verification is skipped (endpoint stays IP rate-limited regardless).
   // When set, requests without a valid token are rejected 400.
   TURNSTILE_SECRET_KEY: z.string().optional(),
+
+  // --- Roster Signal (recruiter-intelligence product) feature gates ---
+  //
+  // Signal is dev-only until the eval harness passes with consultant-
+  // labeled data (see implementation plan section 8). These two flags
+  // plus the per-workspace `workspaces.signal_enabled` column are the
+  // three layers that keep it off prod by accident.
+  //
+  // SIGNAL_SERVICES_ENABLED gates the API side: when false the
+  // `/v1/signal/*` kill-switch middleware short-circuits with 404 before
+  // it even reads the workspace row, so Signal services are invisible.
+  // Defaults false — any environment that wants Signal must opt in.
+  //
+  // COCKPIT_SIGNAL_ENABLED is the FE-facing flag. The BE doesn't read
+  // it today, but we declare it here so the two Signal flags live
+  // alongside each other and so tests + typecheck exercise the same
+  // Zod schema the FE's config layer will.
+  //
+  // Zod coerces the incoming env string ("true"/"false"/empty) into a
+  // boolean via `z.coerce.boolean()`. Note: `z.coerce.boolean()` treats
+  // ANY non-empty string as true, so we parse explicitly against
+  // "true"/"1" to avoid a stray value like "false" turning into true.
+  SIGNAL_SERVICES_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
+  COCKPIT_SIGNAL_ENABLED: z
+    .string()
+    .optional()
+    .transform((v) => v === "true" || v === "1"),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

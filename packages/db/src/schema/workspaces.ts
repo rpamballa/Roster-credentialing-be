@@ -16,6 +16,11 @@ export const workspaces = pgTable("workspaces", {
   // workspaceId is passed — the product rule that every provider lands in
   // at least one workspace. See migration 0019.
   isPlatformDefault: boolean("is_platform_default").notNull().default(false),
+  // Per-workspace kill switch for the Roster Signal product. Defaults
+  // false — a workspace only sees Signal when BOTH this column is true
+  // AND SIGNAL_SERVICES_ENABLED is true at the service level. See
+  // migration 0021 and apps/api/src/middleware/signalKillSwitch.ts.
+  signalEnabled: boolean("signal_enabled").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
