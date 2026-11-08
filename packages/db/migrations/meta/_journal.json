@@ -148,6 +148,13 @@
       "when": 1762200000000,
       "tag": "0020_drop_magic_link_and_backfill_orphan_users",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1762531200000,
+      "tag": "0021_signal_workspace_flag",
+      "breakpoints": true
     }
   ]
 }
