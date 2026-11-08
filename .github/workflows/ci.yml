@@ -81,5 +81,7 @@ jobs:
         run: pnpm typecheck
       - name: Biome (lint + format check)
         run: pnpm exec biome check
+      - name: Vitest — @cred/db (signal canonical data: lineage, DAL, ER)
+        run: pnpm --filter @cred/db test
       - name: Vitest — integration tests hit real Postgres + Redis + fake-gcs via services
         run: pnpm --filter @cred/api test
