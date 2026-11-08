@@ -83,5 +83,7 @@ jobs:
         run: pnpm exec biome check
       - name: Vitest — @cred/db (signal canonical data: lineage, DAL, ER)
         run: pnpm --filter @cred/db test
+      - name: Vitest — @cred/signal-ingest (connector plane: readers, runner, gaps)
+        run: pnpm --filter @cred/signal-ingest test
       - name: Vitest — integration tests hit real Postgres + Redis + fake-gcs via services
         run: pnpm --filter @cred/api test
