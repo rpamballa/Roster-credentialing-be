@@ -25,6 +25,13 @@ export const signalConversations = pgTable(
     channel: text("channel").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).defaultNow().notNull(),
     summary: text("summary"),
+    /**
+     * Full normalized conversation text. Nullable because the extracts
+     * pipeline (WS E) reads it, but we keep rows around for audit when
+     * `consent_state = 'revoked'` and the consent helper zeroes this
+     * out at that point. See `@cred/db/signal` consent helpers.
+     */
+    body: text("body"),
     consentState: text("consent_state").notNull().default("unknown"),
     sourceRef: jsonb("source_ref").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),

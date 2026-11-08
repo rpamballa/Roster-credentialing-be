@@ -86,7 +86,8 @@ export async function readConversations(ctx: ReaderContext): Promise<Conversatio
     // messages that were queued but not yet sent (still recorded).
     const occurredAt = r.sentAt ?? r.scheduledAt ?? new Date();
 
-    const summary = (r.body ?? "").slice(0, 280);
+    const body = r.body ?? "";
+    const summary = body.slice(0, 280);
 
     const record: ConversationRecord = {
       providerIdentity,
@@ -104,6 +105,7 @@ export async function readConversations(ctx: ReaderContext): Promise<Conversatio
       },
     };
     if (summary) record.summary = summary;
+    if (body) record.body = body;
     return record;
   });
 }

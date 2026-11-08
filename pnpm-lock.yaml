@@ -50,6 +50,9 @@ importers:
       '@cred/signal-explain':
         specifier: workspace:*
         version: link:../../packages/signal-explain
+      '@cred/signal-extracts':
+        specifier: workspace:*
+        version: link:../../packages/signal-extracts
       '@cred/signal-learn':
         specifier: workspace:*
         version: link:../../packages/signal-learn
@@ -343,6 +346,25 @@ importers:
         specifier: 2.1.8
         version: 2.1.8(@types/node@22.10.2)(terser@5.47.1)
 
+  packages/signal-extracts:
+    dependencies:
+      '@cred/db':
+        specifier: workspace:*
+        version: link:../db
+      drizzle-orm:
+        specifier: 0.36.4
+        version: 0.36.4(@opentelemetry/api@1.9.0)(@types/pg@8.6.1)(postgres@3.4.5)
+    devDependencies:
+      postgres:
+        specifier: 3.4.5
+        version: 3.4.5
+      typescript:
+        specifier: 5.7.2
+        version: 5.7.2
+      vitest:
+        specifier: 2.1.8
+        version: 2.1.8(@types/node@22.10.2)(terser@5.47.1)
+
   packages/signal-ingest:
     dependencies:
       '@cred/db':
@@ -354,6 +376,9 @@ importers:
       '@cred/signal-cred-bridge':
         specifier: workspace:*
         version: link:../signal-cred-bridge
+      '@cred/signal-extracts':
+        specifier: workspace:*
+        version: link:../signal-extracts
       drizzle-orm:
         specifier: 0.36.4
         version: 0.36.4(@opentelemetry/api@1.9.0)(@types/pg@8.6.1)(postgres@3.4.5)

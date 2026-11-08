@@ -490,7 +490,12 @@ describe("Signal · WS A core engine", () => {
       const seed = await seedWorkspace({ slug: "consent", signalEnabled: true });
       const [convo] = await db()
         .insert(schema.signalConversations)
-        .values({ workspaceId: seed.workspaceId, channel: "email", consentState: "pending" })
+        .values({
+          workspaceId: seed.workspaceId,
+          channel: "email",
+          consentState: "pending",
+          body: "Available May; prefers Texas.",
+        })
         .returning();
       const app = buildApp();
       const res = await call(app, "POST", "/v1/signal/conversations/consent", seed.sid, {
@@ -499,10 +504,61 @@ describe("Signal · WS A core engine", () => {
       });
       expect(res.status).toBe(200);
       const [updated] = await db()
-        .select({ consentState: schema.signalConversations.consentState })
+        .select({
+          consentState: schema.signalConversations.consentState,
+          body: schema.signalConversations.body,
+        })
         .from(schema.signalConversations)
         .where(eq(schema.signalConversations.id, convo!.id));
       expect(updated?.consentState).toBe("granted");
+      // Grant keeps the body around for the ranker/UI to read.
+      expect(updated?.body).toBe("Available May; prefers Texas.");
+    });
+
+    it("revoke nulls the body but keeps the row for audit", async () => {
+      const seed = await seedWorkspace({ slug: "consent-revoke", signalEnabled: true });
+      const [convo] = await db()
+        .insert(schema.signalConversations)
+        .values({
+          workspaceId: seed.workspaceId,
+          channel: "email",
+          consentState: "granted",
+          body: "Sensitive provider content here.",
+        })
+        .returning();
+      const app = buildApp();
+      const res = await call(app, "POST", "/v1/signal/conversations/consent", seed.sid, {
+        conversationId: convo!.id,
+        state: "revoked",
+      });
+      expect(res.status).toBe(200);
+      const [updated] = await db()
+        .select()
+        .from(schema.signalConversations)
+        .where(eq(schema.signalConversations.id, convo!.id));
+      expect(updated?.consentState).toBe("revoked");
+      expect(updated?.body).toBeNull();
+      // Row stays — occurred_at, channel preserved.
+      expect(updated?.channel).toBe("email");
+    });
+
+    it("implied_outbound rows cannot be flipped through the consent API", async () => {
+      const seed = await seedWorkspace({ slug: "consent-frozen", signalEnabled: true });
+      const [convo] = await db()
+        .insert(schema.signalConversations)
+        .values({
+          workspaceId: seed.workspaceId,
+          channel: "email",
+          consentState: "implied_outbound",
+          body: "Outbound recruiter email we authored.",
+        })
+        .returning();
+      const app = buildApp();
+      const res = await call(app, "POST", "/v1/signal/conversations/consent", seed.sid, {
+        conversationId: convo!.id,
+        state: "revoked",
+      });
+      expect(res.status).toBe(409);
     });
 
     it("eval run returns 202 and records a queued conversation row", async () => {

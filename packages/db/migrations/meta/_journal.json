@@ -169,6 +169,13 @@
       "when": 1762531320000,
       "tag": "0023_signal_weights",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1762531380000,
+      "tag": "0024_signal_conversation_body_and_extract_idempotency",
+      "breakpoints": true
     }
   ]
 }
