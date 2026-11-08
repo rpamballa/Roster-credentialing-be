@@ -1,0 +1,25 @@
+# compose.signal.override.yml
+#
+# Signal v0 · dev-instance overlay. Auto-loaded by docker compose
+# alongside the main `compose.yml` so the Signal feature flag
+# plumbs through to the api + worker containers without editing
+# the deploy repo's checked-in compose.yml (which gets git-pull'd
+# on every main-branch deploy).
+#
+# The api service points at an image tagged `signal-v0-<sha>` that
+# was built natively on this VM (deploy repo's regular CI path lacks
+# upload permissions on the artifact registry for this account, so
+# the Signal image lives ONLY on the local docker daemon here).
+# `pull_policy: never` prevents a `docker compose pull` from trying
+# to fetch the tag from the registry and failing with "not found".
+#
+# To roll back to stock prod main: unset API_TAG in /opt/roster/.env
+# (or set it to the current main sha) and remove this file, then
+# `sudo docker compose up -d --no-deps api`.
+
+services:
+  api:
+    pull_policy: never
+    environment:
+      SIGNAL_SERVICES_ENABLED: ${SIGNAL_SERVICES_ENABLED-false}
+      COCKPIT_SIGNAL_ENABLED: ${COCKPIT_SIGNAL_ENABLED-false}
