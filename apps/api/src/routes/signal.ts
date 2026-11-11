@@ -26,7 +26,7 @@ import { runExtracts } from "@cred/signal-extracts";
 import { readWeights } from "@cred/signal-learn";
 import { rankJobCandidates, rankProviderOpenings } from "@cred/signal-match";
 import { zValidator } from "@hono/zod-validator";
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, lte, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type { ApiBindings } from "../types.js";
@@ -101,6 +101,119 @@ export const signalRoutes = new Hono<ApiBindings>();
 
 // All Signal routes share the same tenancy guard.
 signalRoutes.use("/v1/signal/*", requireSignalTenancy);
+
+// ─── GET /v1/signal/jobs ──────────────────────────────────────────────────
+//
+// List open requisitions in the current workspace for the daily landing
+// view (Mode A: `/cockpit/signal`, Mode B: `/signal`). Replaces the
+// FE-side `?jobIds=a,b,c` workaround — the landing page can now ask the
+// BE for "what's open today" without curating a list first.
+//
+// Default filter (what the FE lands on):
+//   - `req_opened_at IS NOT NULL` — WS C's partial ingest leaves some
+//     rows without an `req_opened_at`; those aren't real open reqs yet,
+//     so we skip them.
+//   - `need_date >= today (UTC)` — expired reqs drop off automatically.
+//   - `state IS NOT NULL` — the ranker's license-lane projection keys
+//     off state; rows without it would never match a provider.
+// Default sort: `need_date ASC` (most urgent first), with `req_opened_at
+// DESC` as a stable tie-breaker so two jobs with the same need-date
+// come back in insertion order.
+// Default limit: 50. Max 200. `limit=0` is not accepted — the caller
+// should omit the param if they want the default.
+//
+// Query filters (all optional, all AND-ed):
+//   - `?specialty=cardiac`
+//   - `?state=MA`
+//   - `?needBefore=YYYY-MM-DD` — upper bound on need_date (inclusive)
+//   - `?needAfter=YYYY-MM-DD` — lower bound on need_date (inclusive);
+//     overrides the "today" default when supplied.
+//
+// Tenancy is handled by `requireSignalTenancy` above; the kill switch
+// handles 404/503 for SIGNAL_SERVICES_ENABLED and per-workspace
+// `signal_enabled`.
+const JobsListQuery = z.object({
+  specialty: z.string().trim().min(1).max(200).optional(),
+  state: z.string().trim().min(1).max(50).optional(),
+  needBefore: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  needAfter: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+signalRoutes.get("/v1/signal/jobs", zValidator("query", JobsListQuery), async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const q = c.req.valid("query");
+  const limit = q.limit ?? 50;
+
+  // Need-date lower bound: `?needAfter` wins when supplied; otherwise
+  // the default is "today (UTC)" so expired reqs fall off. Need-date
+  // columns are stored as PG `date` — compare via YYYY-MM-DD strings
+  // so we don't trip on local-timezone off-by-ones.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const needAfter = q.needAfter ?? todayIso;
+
+  const predicates = [
+    eq(schema.signalJobs.workspaceId, workspaceId),
+    isNotNull(schema.signalJobs.reqOpenedAt),
+    isNotNull(schema.signalJobs.state),
+    isNotNull(schema.signalJobs.needDate),
+    gte(schema.signalJobs.needDate, needAfter),
+  ];
+  if (q.needBefore) {
+    predicates.push(lte(schema.signalJobs.needDate, q.needBefore));
+  }
+  if (q.specialty) {
+    predicates.push(eq(schema.signalJobs.specialty, q.specialty));
+  }
+  if (q.state) {
+    predicates.push(eq(schema.signalJobs.state, q.state));
+  }
+
+  const rows = await db()
+    .select({
+      id: schema.signalJobs.id,
+      facilityId: schema.signalJobs.facilityId,
+      specialty: schema.signalJobs.specialty,
+      needDate: schema.signalJobs.needDate,
+      state: schema.signalJobs.state,
+      reqOpenedAt: schema.signalJobs.reqOpenedAt,
+    })
+    .from(schema.signalJobs)
+    .where(and(...predicates))
+    .orderBy(asc(schema.signalJobs.needDate), desc(schema.signalJobs.reqOpenedAt))
+    .limit(limit);
+
+  // `total` is a count of what _would_ match the same filter if the
+  // limit were lifted — the FE uses it to show "showing N of total"
+  // when pagination lands. We run it as a separate COUNT so the row
+  // payload stays small; Postgres evaluates the predicate once per
+  // request either way.
+  const totalRows = await db()
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.signalJobs)
+    .where(and(...predicates));
+  const total = totalRows[0]?.n ?? 0;
+
+  return c.json({
+    jobs: rows.map((r) => ({
+      id: r.id,
+      facilityId: r.facilityId,
+      specialty: r.specialty,
+      // need_date is `date`, drizzle returns YYYY-MM-DD already.
+      needDate: r.needDate,
+      state: r.state,
+      reqOpenedAt: r.reqOpenedAt.toISOString(),
+    })),
+    total,
+    limit,
+  });
+});
 
 // ─── GET /v1/signal/jobs/:id/ranking ───────────────────────────────────────
 //
