@@ -30,6 +30,7 @@ import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-o
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { mountAdapterRoutes } from "./signal/adapters.js";
+import { mountTeamRoutes } from "./signal/team.js";
 import type { ApiBindings } from "../types.js";
 
 // Default eval fixture resolves relative to this file at build time
@@ -108,6 +109,11 @@ signalRoutes.use("/v1/signal/*", requireSignalTenancy);
 // the implementation lives in `signal/adapters.ts` to keep this file
 // focused on the core engine routes.
 mountAdapterRoutes(signalRoutes);
+
+// Team view HTTP surface — `/v1/signal/team`. Serves the FE's hub-and-
+// spoke specialist → provider network. Implementation lives in
+// `signal/team.ts`.
+mountTeamRoutes(signalRoutes);
 
 // ─── GET /v1/signal/jobs ──────────────────────────────────────────────────
 //
