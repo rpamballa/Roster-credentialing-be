@@ -185,7 +185,9 @@ describe("Signal · /v1/signal/adapters HTTP surface", () => {
     const seed = await seedWorkspace("adapters-preview-stub");
     const app = buildApp();
     const res = await call(app, "POST", "/v1/signal/adapters/bullhorn/preview", seed.sid);
-    expect(res.status).toBe(502);
+    // Status is 200 so Cloudflare's edge doesn't swap the structured
+    // body for its own 5xx page; the client branches on `body.ok`.
+    expect(res.status).toBe(200);
     const body = (await res.json()) as {
       ok: boolean;
       notImplemented?: { adapter: string; required: Record<string, unknown> };
