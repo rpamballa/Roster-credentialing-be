@@ -26,7 +26,7 @@ import { runExtracts } from "@cred/signal-extracts";
 import { readWeights } from "@cred/signal-learn";
 import { rankJobCandidates, rankProviderOpenings } from "@cred/signal-match";
 import { zValidator } from "@hono/zod-validator";
-import { and, asc, desc, eq, gte, isNotNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type { ApiBindings } from "../types.js";
@@ -381,7 +381,7 @@ signalRoutes.get(
       .where(
         and(
           eq(schema.signalProviders.workspaceId, workspaceId),
-          sql`${schema.signalProviders.id} = ANY(${providerIds})`,
+          inArray(schema.signalProviders.id, providerIds),
         ),
       );
 
@@ -400,7 +400,7 @@ signalRoutes.get(
           eq(schema.signalCredentials.workspaceId, workspaceId),
           eq(schema.signalCredentials.type, "state_license"),
           isNotNull(schema.signalCredentials.state),
-          sql`${schema.signalCredentials.providerId} = ANY(${providerIds})`,
+          inArray(schema.signalCredentials.providerId, providerIds),
         ),
       );
     const licensesByProvider = new Map<string, string[]>();
@@ -425,7 +425,7 @@ signalRoutes.get(
         and(
           eq(schema.signalConversations.workspaceId, workspaceId),
           isNotNull(schema.signalConversations.providerId),
-          sql`${schema.signalConversations.providerId} = ANY(${providerIds})`,
+          inArray(schema.signalConversations.providerId, providerIds),
         ),
       )
       .orderBy(desc(schema.signalConversations.occurredAt));
