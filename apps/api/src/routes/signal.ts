@@ -215,6 +215,332 @@ signalRoutes.get("/v1/signal/jobs", zValidator("query", JobsListQuery), async (c
   });
 });
 
+// ─── GET /v1/signal/specialist/call-list ──────────────────────────────────
+//
+// The specialist's dedup'd ranked call list — providers ordered by the
+// best score they hold across the workspace's open reqs. Powers the
+// new deck-spec /signal/providers surface (one provider per row, not
+// one job per row).
+//
+// v0 shim: fan out across the workspace's top-N open reqs via the
+// existing `rankJobCandidates` engine, then dedup by providerId
+// keeping each provider's best (score, jobId). This reuses the
+// snapshotted rankings when `rankJobCandidates` has already written
+// one today, so the surface is cheap to re-open.
+//
+// TODO (follow-up): a native "rank providers across all open reqs"
+// pass in signal-match would avoid the fan-out. Today's shim is fine
+// for the scale we ship on (≤ 50 open reqs per workspace).
+const CallListQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  specialty: z.string().trim().min(1).max(200).optional(),
+  state: z.string().trim().min(1).max(50).optional(),
+  engagement: z.enum(["warming", "active", "cooling", "dormant"]).optional(),
+  /** Internal knob: how many open reqs to scan under the hood. */
+  jobsScanned: z.coerce.number().int().min(1).max(50).optional(),
+});
+
+signalRoutes.get(
+  "/v1/signal/specialist/call-list",
+  zValidator("query", CallListQuery),
+  async (c) => {
+    const { workspaceId } = c.var.signalTenancy;
+    const q = c.req.valid("query");
+    const limit = q.limit ?? 30;
+    const jobsScanned = q.jobsScanned ?? 15;
+
+    // Step 1: pick the workspace's most urgent open reqs. Same filter as
+    // GET /v1/signal/jobs (open + has need_date + has state), sorted by
+    // need_date asc so the ranker rewards urgency.
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const jobPredicates = [
+      eq(schema.signalJobs.workspaceId, workspaceId),
+      isNotNull(schema.signalJobs.reqOpenedAt),
+      isNotNull(schema.signalJobs.state),
+      isNotNull(schema.signalJobs.needDate),
+      gte(schema.signalJobs.needDate, todayIso),
+    ];
+    if (q.specialty) jobPredicates.push(eq(schema.signalJobs.specialty, q.specialty));
+    if (q.state) jobPredicates.push(eq(schema.signalJobs.state, q.state));
+
+    const openJobs = await db()
+      .select({
+        id: schema.signalJobs.id,
+        specialty: schema.signalJobs.specialty,
+        state: schema.signalJobs.state,
+        needDate: schema.signalJobs.needDate,
+      })
+      .from(schema.signalJobs)
+      .where(and(...jobPredicates))
+      .orderBy(asc(schema.signalJobs.needDate), desc(schema.signalJobs.reqOpenedAt))
+      .limit(jobsScanned);
+
+    if (openJobs.length === 0) {
+      return c.json({
+        providers: [],
+        total: 0,
+        limit,
+        jobsScanned: 0,
+      });
+    }
+
+    // Step 2: fan out — rank candidates per job. Prefer today's cached
+    // snapshot when it exists; fall back to the live ranker. We only
+    // need (providerId, score, topJobId) so we don't need the full
+    // reasons payload here.
+    const weights = await readWeights({ workspaceId });
+
+    interface Best {
+      providerId: string;
+      score: number;
+      jobId: string;
+      earliestStartDate: string | null;
+    }
+    const bestByProvider = new Map<string, Best>();
+
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    for (const job of openJobs) {
+      // Prefer today's snapshot to avoid paying the rank cost twice
+      // when the cockpit already loaded the per-job view.
+      const cached = await db()
+        .select()
+        .from(schema.signalRankings)
+        .where(
+          and(
+            eq(schema.signalRankings.workspaceId, workspaceId),
+            eq(schema.signalRankings.jobId, job.id),
+          ),
+        )
+        .orderBy(desc(schema.signalRankings.rankedAt))
+        .limit(1);
+
+      interface Row {
+        providerId: string;
+        score: number;
+        earliestStartDate: string | null;
+      }
+      let rows: Row[];
+      const snap = cached[0];
+      if (snap && snap.rankedAt.getTime() >= today.getTime()) {
+        rows = snap.entries.map((e) => ({
+          providerId: e.provider_id,
+          score: e.score,
+          // Snapshot JSON does not carry earliest-start; rely on live
+          // run when the brief page needs it.
+          earliestStartDate: null,
+        }));
+      } else {
+        const result = await rankJobCandidates({ workspaceId, jobId: job.id, weights });
+        rows = result.candidates.map((e) => ({
+          providerId: e.providerId,
+          score: e.score,
+          earliestStartDate: e.earliestStartDate,
+        }));
+      }
+
+      for (const row of rows) {
+        const prior = bestByProvider.get(row.providerId);
+        if (!prior || row.score > prior.score) {
+          bestByProvider.set(row.providerId, {
+            providerId: row.providerId,
+            score: row.score,
+            jobId: job.id,
+            earliestStartDate: row.earliestStartDate,
+          });
+        }
+      }
+    }
+
+    if (bestByProvider.size === 0) {
+      return c.json({
+        providers: [],
+        total: 0,
+        limit,
+        jobsScanned: openJobs.length,
+      });
+    }
+
+    // Step 3: enrich — attach provider display rows + license-state
+    // list + last-conversation timestamp + last channel so the FE can
+    // render engagement chips + suggested outreach. All workspace-
+    // scoped joins.
+    const providerIds = Array.from(bestByProvider.keys());
+
+    const providerRows = await db()
+      .select({
+        id: schema.signalProviders.id,
+        name: schema.signalProviders.name,
+        npi: schema.signalProviders.npi,
+        specialties: schema.signalProviders.specialties,
+        regionPrefs: schema.signalProviders.regionPrefs,
+        availabilityHint: schema.signalProviders.availabilityHint,
+      })
+      .from(schema.signalProviders)
+      .where(
+        and(
+          eq(schema.signalProviders.workspaceId, workspaceId),
+          sql`${schema.signalProviders.id} = ANY(${providerIds})`,
+        ),
+      );
+
+    // License states — one query, grouped in memory. Only `state_license`
+    // rows with a non-null `state` count. Home state comes from the
+    // provider's region_prefs[0] when available, otherwise the first
+    // license state we see.
+    const licRows = await db()
+      .select({
+        providerId: schema.signalCredentials.providerId,
+        state: schema.signalCredentials.state,
+      })
+      .from(schema.signalCredentials)
+      .where(
+        and(
+          eq(schema.signalCredentials.workspaceId, workspaceId),
+          eq(schema.signalCredentials.type, "state_license"),
+          isNotNull(schema.signalCredentials.state),
+          sql`${schema.signalCredentials.providerId} = ANY(${providerIds})`,
+        ),
+      );
+    const licensesByProvider = new Map<string, string[]>();
+    for (const r of licRows) {
+      if (!r.state) continue;
+      const bucket = licensesByProvider.get(r.providerId) ?? [];
+      if (!bucket.includes(r.state)) bucket.push(r.state);
+      licensesByProvider.set(r.providerId, bucket);
+    }
+
+    // Conversation recency + last channel (per provider). Postgres
+    // DISTINCT ON would be ideal, but Drizzle's SQL builder doesn't
+    // model it cleanly — fetch a wider window and reduce in memory.
+    const convoRows = await db()
+      .select({
+        providerId: schema.signalConversations.providerId,
+        occurredAt: schema.signalConversations.occurredAt,
+        channel: schema.signalConversations.channel,
+      })
+      .from(schema.signalConversations)
+      .where(
+        and(
+          eq(schema.signalConversations.workspaceId, workspaceId),
+          isNotNull(schema.signalConversations.providerId),
+          sql`${schema.signalConversations.providerId} = ANY(${providerIds})`,
+        ),
+      )
+      .orderBy(desc(schema.signalConversations.occurredAt));
+
+    interface ConvoAgg {
+      lastAt: Date;
+      lastChannel: string;
+      countLast7d: number;
+      countLast14d: number;
+      countLast30d: number;
+    }
+    const convoAggByProvider = new Map<string, ConvoAgg>();
+    const now = Date.now();
+    const d7 = 7 * 24 * 60 * 60 * 1000;
+    const d14 = 14 * 24 * 60 * 60 * 1000;
+    const d30 = 30 * 24 * 60 * 60 * 1000;
+    for (const r of convoRows) {
+      if (!r.providerId) continue;
+      const agg = convoAggByProvider.get(r.providerId) ?? {
+        lastAt: r.occurredAt,
+        lastChannel: r.channel,
+        countLast7d: 0,
+        countLast14d: 0,
+        countLast30d: 0,
+      };
+      // First row for this provider (ordered DESC) is the most recent.
+      if (r.occurredAt > agg.lastAt) {
+        agg.lastAt = r.occurredAt;
+        agg.lastChannel = r.channel;
+      }
+      const age = now - r.occurredAt.getTime();
+      if (age <= d7) agg.countLast7d += 1;
+      if (age <= d14) agg.countLast14d += 1;
+      if (age <= d30) agg.countLast30d += 1;
+      convoAggByProvider.set(r.providerId, agg);
+    }
+
+    function classifyEngagement(
+      agg: ConvoAgg | undefined,
+    ): "warming" | "active" | "cooling" | "dormant" {
+      if (!agg) return "dormant";
+      const ageDays = (now - agg.lastAt.getTime()) / (24 * 60 * 60 * 1000);
+      if (agg.countLast7d >= 2) return "warming";
+      if (ageDays <= 14) return "active";
+      if (ageDays <= 30) return "cooling";
+      return "dormant";
+    }
+
+    // Step 4: compose output rows + optional engagement filter.
+    interface OutRow {
+      id: string;
+      name: string;
+      npi: string | null;
+      specialty: string;
+      subSpecialty: string | null;
+      matchScore: number;
+      homeState: string | null;
+      licenseStates: string[];
+      lastConversationAt: string | null;
+      bestChannel: string | null;
+      engagement: "warming" | "active" | "cooling" | "dormant";
+      topJobId: string;
+      earliestStartDate: string | null;
+    }
+    const providerRowById = new Map(providerRows.map((p) => [p.id, p]));
+    const out: OutRow[] = [];
+    for (const [providerId, best] of bestByProvider) {
+      const provider = providerRowById.get(providerId);
+      if (!provider) continue;
+      const licenseStates = licensesByProvider.get(providerId) ?? [];
+      const specialtiesArr = provider.specialties ?? [];
+      const specialty = specialtiesArr[0] ?? "Anesthesia";
+      const subSpecialty = specialtiesArr[1] ?? null;
+      const regionPrefs = provider.regionPrefs ?? [];
+      const homeState = regionPrefs[0] ?? licenseStates[0] ?? null;
+      const convoAgg = convoAggByProvider.get(providerId);
+      const engagement = classifyEngagement(convoAgg);
+
+      if (q.engagement && q.engagement !== engagement) continue;
+
+      out.push({
+        id: providerId,
+        name: provider.name,
+        npi: provider.npi,
+        specialty,
+        subSpecialty,
+        matchScore: best.score,
+        homeState,
+        licenseStates,
+        lastConversationAt: convoAgg ? convoAgg.lastAt.toISOString() : null,
+        bestChannel: convoAgg ? convoAgg.lastChannel : null,
+        engagement,
+        topJobId: best.jobId,
+        earliestStartDate: best.earliestStartDate,
+      });
+    }
+
+    // Final sort: match score desc, then name asc for stable rows.
+    out.sort((a, b) => {
+      if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+      return a.name.localeCompare(b.name);
+    });
+
+    const total = out.length;
+    const sliced = out.slice(0, limit);
+
+    return c.json({
+      providers: sliced,
+      total,
+      limit,
+      jobsScanned: openJobs.length,
+    });
+  },
+);
+
 // ─── GET /v1/signal/jobs/:id/ranking ───────────────────────────────────────
 //
 // Rank the providers in the current workspace against this job and
