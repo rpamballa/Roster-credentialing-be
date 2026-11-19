@@ -128,7 +128,11 @@ BEGIN
     ('c0000001-0000-0000-0000-000000000016', '1700000022', 'Vera',     'Juarez',     'vera.juarez@signal-seed.test',     '305-555-0122', ARRAY['anesthesiology','ob'],         ARRAY['FL','CA']),
     ('c0000001-0000-0000-0000-000000000017', '1700000023', 'Will',     'Khan',       'will.khan@signal-seed.test',       '617-555-0123', ARRAY['anesthesiology','general'],    ARRAY['MA','PA']),
     ('c0000001-0000-0000-0000-000000000018', '1700000024', 'Xian',     'Lopez',      'xian.lopez@signal-seed.test',      '512-555-0124', ARRAY['anesthesiology','pediatric'],  ARRAY['TX','GA','IL']),
-    ('c0000001-0000-0000-0000-000000000019', '1700000025', 'Yael',     'Monroe',     'yael.monroe@signal-seed.test',     '720-555-0125', ARRAY['anesthesiology','pain'],       ARRAY['CO','WA','AZ'])
+    ('c0000001-0000-0000-0000-000000000019', '1700000025', 'Yael',     'Monroe',     'yael.monroe@signal-seed.test',     '720-555-0125', ARRAY['anesthesiology','pain'],       ARRAY['CO','WA','AZ']),
+    -- v3 additions: lifecycle-breadth (NEWLY ONBOARDED — within last 2 weeks)
+    ('c0000001-0000-0000-0000-00000000001a', '1700000026', 'Zoe',      'Alvarado',   'zoe.alvarado@signal-seed.test',    '512-555-0126', ARRAY['anesthesiology','cardiac'],    ARRAY['TX']),
+    ('c0000001-0000-0000-0000-00000000001b', '1700000027', 'Ari',      'Bello',      'ari.bello@signal-seed.test',       '305-555-0127', ARRAY['anesthesiology','ob'],         ARRAY['FL']),
+    ('c0000001-0000-0000-0000-00000000001c', '1700000028', 'Bodhi',    'Cho',        'bodhi.cho@signal-seed.test',       '617-555-0128', ARRAY['anesthesiology','pediatric'],  ARRAY['MA'])
   ON CONFLICT (id) DO UPDATE SET
     first_name      = EXCLUDED.first_name,
     last_name       = EXCLUDED.last_name,
@@ -136,6 +140,20 @@ BEGIN
     phone           = EXCLUDED.phone,
     specialties     = EXCLUDED.specialties,
     states_licensed = EXCLUDED.states_licensed;
+
+  -- ─── lifecycle breadth: created_at timestamps ──────────────────
+  -- New onboards (within last 2 weeks) — minimal verifications,
+  -- pending background checks.
+  UPDATE providers SET created_at = now() - interval '5 days'  WHERE id = 'c0000001-0000-0000-0000-00000000001a';
+  UPDATE providers SET created_at = now() - interval '9 days'  WHERE id = 'c0000001-0000-0000-0000-00000000001b';
+  UPDATE providers SET created_at = now() - interval '12 days' WHERE id = 'c0000001-0000-0000-0000-00000000001c';
+  -- Long-tenured providers (> 6 months in platform) — bump three
+  -- of the existing cohort back in time so the ranker sees a mix.
+  UPDATE providers SET created_at = now() - interval '14 months' WHERE id = 'c0000001-0000-0000-0000-000000000001'; -- Alex Morgan
+  UPDATE providers SET created_at = now() - interval '18 months' WHERE id = 'c0000001-0000-0000-0000-000000000007'; -- Grey Umoren
+  UPDATE providers SET created_at = now() - interval '11 months' WHERE id = 'c0000001-0000-0000-0000-00000000000a'; -- Jules Xavier
+  UPDATE providers SET created_at = now() - interval '13 months' WHERE id = 'c0000001-0000-0000-0000-000000000010'; -- Priya Delgado
+  UPDATE providers SET created_at = now() - interval '9 months'  WHERE id = 'c0000001-0000-0000-0000-00000000000f'; -- Omar Choi
 
   -- ─── provider_workspace_grants ─────────────────────────────────
   INSERT INTO provider_workspace_grants (provider_id, workspace_id)
@@ -381,7 +399,39 @@ BEGIN
     ('d0000001-0000-0000-0000-000000000196', ws, 'c0000001-0000-0000-0000-000000000019', 'drug_screen',      'manual', NULL, NULL, 'clear',     now()),
     ('d0000001-0000-0000-0000-000000000197', ws, 'c0000001-0000-0000-0000-000000000019', 'imlc',             'manual', NULL, NULL, 'active',    now()),
     ('d0000001-0000-0000-0000-000000000198', ws, 'c0000001-0000-0000-0000-000000000019', 'state_csr',        'manual', 'CO', 'CSR-CO-025',  'active',   now()),
-    ('d0000001-0000-0000-0000-000000000199', ws, 'c0000001-0000-0000-0000-000000000019', 'state_csr',        'manual', 'AZ', 'CSR-AZ-025',  'active',   now())
+    ('d0000001-0000-0000-0000-000000000199', ws, 'c0000001-0000-0000-0000-000000000019', 'state_csr',        'manual', 'AZ', 'CSR-AZ-025',  'active',   now()),
+    -- ── Provider 26 (Zoe Alvarado): cardiac, TX only, NEWLY ONBOARDED (minimal creds, pending background check)
+    ('d0000001-0000-0000-0000-00000000011a', ws, 'c0000001-0000-0000-0000-00000000001a', 'board_cert',       'abms',   NULL, NULL, 'certified', now()),
+    ('d0000001-0000-0000-0000-00000000011b', ws, 'c0000001-0000-0000-0000-00000000001a', 'dea',              'manual', NULL, 'DEA1000026', 'active',    now()),
+    ('d0000001-0000-0000-0000-00000000011c', ws, 'c0000001-0000-0000-0000-00000000001a', 'acls',             'manual', NULL, NULL, 'active',    now()),
+    ('d0000001-0000-0000-0000-00000000011d', ws, 'c0000001-0000-0000-0000-00000000001a', 'background_check', 'manual', NULL, NULL, 'pending',   now()),
+    -- intentionally NO immunizations / drug_screen / state_csr → projection stays well in the future
+    -- ── Provider 27 (Ari Bello): ob, FL only, NEWLY ONBOARDED
+    ('d0000001-0000-0000-0000-00000000012b', ws, 'c0000001-0000-0000-0000-00000000001b', 'board_cert',       'abms',   NULL, NULL, 'certified', now()),
+    ('d0000001-0000-0000-0000-00000000012c', ws, 'c0000001-0000-0000-0000-00000000001b', 'dea',              'manual', NULL, 'DEA1000027', 'active',    now()),
+    ('d0000001-0000-0000-0000-00000000012d', ws, 'c0000001-0000-0000-0000-00000000001b', 'background_check', 'manual', NULL, NULL, 'pending',   now()),
+    -- missing ACLS, immunizations, drug_screen, state_csr → still being onboarded
+    -- ── Provider 28 (Bodhi Cho): pediatric, MA only, NEWLY ONBOARDED
+    ('d0000001-0000-0000-0000-00000000013b', ws, 'c0000001-0000-0000-0000-00000000001c', 'board_cert',       'abms',   NULL, NULL, 'certified', now()),
+    ('d0000001-0000-0000-0000-00000000013c', ws, 'c0000001-0000-0000-0000-00000000001c', 'dea',              'manual', NULL, 'DEA1000028', 'active',    now()),
+    ('d0000001-0000-0000-0000-00000000013d', ws, 'c0000001-0000-0000-0000-00000000001c', 'acls',             'manual', NULL, NULL, 'active',    now()),
+    ('d0000001-0000-0000-0000-00000000013e', ws, 'c0000001-0000-0000-0000-00000000001c', 'immunizations',    'manual', NULL, NULL, 'pending',   now()),
+    ('d0000001-0000-0000-0000-00000000013f', ws, 'c0000001-0000-0000-0000-00000000001c', 'background_check', 'manual', NULL, NULL, 'pending',   now())
+  ON CONFLICT (id) DO NOTHING;
+
+  -- ─── lifecycle breadth (lapsed credentials being re-upped) ─────
+  -- Flip two tenured but NOT-override-targeted providers to
+  -- "renewal in flight" so the ranker's BLOCKED_ON_CREDENTIAL facet
+  -- fires visibly without knocking the promote-override candidates
+  -- out of their rankings:
+  --   Hayden Vasquez (provider 8, ob/CO): drug_screen pending → ACLS
+  --     expired (pending renewal row added).
+  --   Yael Monroe (provider 25, pain/CO+WA+AZ): board_cert pending.
+  INSERT INTO verifications (id, workspace_id, provider_id, type, source, state, license_number, status, verified_at)
+  VALUES
+    ('d0000001-0000-0000-0000-00000000080b', ws, 'c0000001-0000-0000-0000-000000000008', 'acls',             'manual', NULL, NULL, 'expired',   now() - interval '21 days'),
+    ('d0000001-0000-0000-0000-00000000080c', ws, 'c0000001-0000-0000-0000-000000000008', 'acls',             'manual', NULL, NULL, 'pending',   now() - interval '2 days'),
+    ('d0000001-0000-0000-0000-00000000019a', ws, 'c0000001-0000-0000-0000-000000000019', 'board_cert',       'abms',   NULL, NULL, 'pending',   now() - interval '5 days')
   ON CONFLICT (id) DO NOTHING;
 
   -- ─── cases (= signal_jobs after ingest) ────────────────────────
@@ -426,8 +476,10 @@ BEGIN
     -- Boston MA — pediatric + general (non-compact)
     ('e0000001-0000-0000-0000-000000000027', ws, 'c0000001-0000-0000-0000-00000000000d', 'b0000001-0000-0000-0000-00000000000a', '1', 'pediatric', 'initial_appointment', 'intake',      now() - interval '9 days',  CURRENT_DATE + 30, '[]'::jsonb),
     ('e0000001-0000-0000-0000-000000000028', ws, 'c0000001-0000-0000-0000-000000000017', 'b0000001-0000-0000-0000-00000000000a', '1', 'general',   'initial_appointment', 'in_progress', now() - interval '13 days', CURRENT_DATE + 100, '[]'::jsonb),
-    -- Atlanta GA — cardiac + general (compact)
-    ('e0000001-0000-0000-0000-000000000029', ws, 'c0000001-0000-0000-0000-000000000010', 'b0000001-0000-0000-0000-00000000000b', '1', 'cardiac',   'initial_appointment', 'intake',      now() - interval '4 days',  CURRENT_DATE + 14, '[]'::jsonb),
+    -- Atlanta GA — cardiac + general (compact). Note +21 day window
+    -- so a temp-privileges candidate (14-day cycle) clears comfortably
+    -- and overrides for this job have a ranking entry to land on.
+    ('e0000001-0000-0000-0000-000000000029', ws, 'c0000001-0000-0000-0000-000000000010', 'b0000001-0000-0000-0000-00000000000b', '1', 'cardiac',   'initial_appointment', 'intake',      now() - interval '4 days',  CURRENT_DATE + 21, '[]'::jsonb),
     ('e0000001-0000-0000-0000-00000000002a', ws, 'c0000001-0000-0000-0000-000000000012', 'b0000001-0000-0000-0000-00000000000b', '1', 'general',   'initial_appointment', 'intake',      now() - interval '6 days',  CURRENT_DATE + 60, '[]'::jsonb),
     -- Cleveland OH — ob + pain (compact)
     ('e0000001-0000-0000-0000-00000000002b', ws, 'c0000001-0000-0000-0000-000000000011', 'b0000001-0000-0000-0000-00000000000c', '1', 'ob',        'initial_appointment', 'intake',      now() - interval '2 days',  CURRENT_DATE + 18, '[]'::jsonb),
@@ -517,7 +569,351 @@ BEGIN
     ('f0000001-0000-0000-0000-000000000031', ws, 'e0000001-0000-0000-0000-000000000031', NULL,
       'Sage Guzman: pain clinic experience in Pennsylvania. Open to Philadelphia pain management assignment. Booked until ' ||
       to_char(CURRENT_DATE + 7, 'YYYY-MM-DD') || ', then available. Rate: $250/hr.',
-      now() - interval '1 day')
+      now() - interval '1 day'),
+    -- ── v3 additions: 3-6 case_notes per active case, varied text ──
+    -- Alex Morgan — Austin cardiac journey (2 extra beyond f...001)
+    ('f0000001-0000-0000-0000-000000000101', ws, 'e0000001-0000-0000-0000-000000000001', NULL,
+      'Follow-up with Alex: he confirmed Texas CSR renewal is in hand. Rate expectation now $245/hr for cardiac blocks. Would prefer a 7-on/7-off schedule. Available immediately once the privileging packet is cleared.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-000000000102', ws, 'e0000001-0000-0000-0000-000000000001', NULL,
+      'Rate negotiation update: Alex floated $260/hr given the cardiothoracic case mix. Facility CMO approved up to $255 per hour. Closing on the offer this week.',
+      now() - interval '12 hours'),
+    -- Grey Umoren — Austin general journey
+    ('f0000001-0000-0000-0000-000000000103', ws, 'e0000001-0000-0000-0000-000000000002', NULL,
+      'Grey: IMLC eligible, Texas CSR missing. Will file CSR paperwork this week. Expected turnaround 30-45 days. Rate band $210-$230 per hour. Open to extended coverage.',
+      now() - interval '2 days'),
+    ('f0000001-0000-0000-0000-000000000104', ws, 'e0000001-0000-0000-0000-000000000002', NULL,
+      'Coverage preference update: Grey wants a mix of Texas and Colorado blocks through Q1 next year. Available January through March. Rate: $220/hr.',
+      now() - interval '1 day'),
+    -- Devin Rivera — Seattle pain journey
+    ('f0000001-0000-0000-0000-000000000105', ws, 'e0000001-0000-0000-0000-000000000006', NULL,
+      'Scheduling conversation: Devin prefers chronic pain cases, less interest in acute. Target rate $285/hr. Available in Seattle starting ' || to_char(CURRENT_DATE + 14, 'YYYY-MM-DD') || '.',
+      now() - interval '2 days'),
+    ('f0000001-0000-0000-0000-000000000106', ws, 'e0000001-0000-0000-0000-000000000006', NULL,
+      'Credential check-in: Devin''s Washington license + state_csr active. California license in good standing. Pain management fellowship confirmed. Rate $280/hr settled.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-000000000107', ws, 'e0000001-0000-0000-0000-000000000006', NULL,
+      'Preference captured: Devin is NOT available weekends. Prefers blocks of 10 consecutive days. Looking at Seattle through April.',
+      now() - interval '6 hours'),
+    -- Alex Morgan — Nashville cardiac journey
+    ('f0000001-0000-0000-0000-000000000108', ws, 'e0000001-0000-0000-0000-000000000008', NULL,
+      'Nashville CT anesthesia opportunity. Alex has strong heart/CT background. IMLC covers Tennessee. Target rate $265/hr. Available ' || to_char(CURRENT_DATE + 18, 'YYYY-MM-DD') || '.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-000000000109', ws, 'e0000001-0000-0000-0000-000000000008', NULL,
+      'Rate conversation: Alex floated $270 per hour given the acuity. Facility ceiling is $260/hr. Scheduling tentative start date mid-month.',
+      now() - interval '8 hours'),
+    -- Jules Xavier — LA pain journey
+    ('f0000001-0000-0000-0000-00000000010a', ws, 'e0000001-0000-0000-0000-00000000000a', NULL,
+      'Jules: regional anesthesia and pain clinic experience. California license current. Target rate $260/hr. Prefers Los Angeles over Denver for this block.',
+      now() - interval '3 days'),
+    ('f0000001-0000-0000-0000-00000000010b', ws, 'e0000001-0000-0000-0000-00000000000a', NULL,
+      'Jules confirmed rate at $255/hr and schedule starting ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || '. Strong preference for pain clinic work over OR cases.',
+      now() - interval '1 day'),
+    -- Kai Yamamoto — NY cardiac
+    ('f0000001-0000-0000-0000-00000000010c', ws, 'e0000001-0000-0000-0000-00000000000d', NULL,
+      'Kai is local to Manhattan, cardiothoracic background. Rate $305/hr for CT anesthesia. Not IMLC eligible — New York only coverage.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-00000000010d', ws, 'e0000001-0000-0000-0000-00000000000d', NULL,
+      'Credential follow-up: Kai''s New York license + CSR active. ACLS current. Available for 6-week block starting ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || '.',
+      now() - interval '8 hours'),
+    -- Uma Ibrahim — NY general
+    ('f0000001-0000-0000-0000-00000000010e', ws, 'e0000001-0000-0000-0000-00000000000e', NULL,
+      'Uma available immediately in Manhattan. Rate $230/hr. Open to general anesthesia work through next quarter.',
+      now() - interval '3 days'),
+    ('f0000001-0000-0000-0000-00000000010f', ws, 'e0000001-0000-0000-0000-00000000000e', NULL,
+      'Uma preference update: she wants to avoid OB cases on this block. General anesthesia only. Would consider Texas placements later.',
+      now() - interval '1 day'),
+    -- Luna Zabala — Miami OB journey
+    ('f0000001-0000-0000-0000-000000000110', ws, 'e0000001-0000-0000-0000-000000000020', NULL,
+      'Luna: OB specialist, Miami-based. Rate $235/hr. Prefers L&D-heavy assignments. Available in Florida starting next month.',
+      now() - interval '2 days'),
+    ('f0000001-0000-0000-0000-000000000111', ws, 'e0000001-0000-0000-0000-000000000020', NULL,
+      'Luna confirmed start ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || ' at $240/hr. Credentials all current. Scheduling block out through year-end.',
+      now() - interval '6 hours'),
+    -- Niko Brennan — Chicago pain
+    ('f0000001-0000-0000-0000-000000000112', ws, 'e0000001-0000-0000-0000-000000000022', NULL,
+      'Niko: IMLC covers IL, OH, MI. Pain management + regional blocks. Rate $275/hr for Chicago pain clinic work. Available ' || to_char(CURRENT_DATE + 15, 'YYYY-MM-DD') || '.',
+      now() - interval '3 days'),
+    ('f0000001-0000-0000-0000-000000000113', ws, 'e0000001-0000-0000-0000-000000000022', NULL,
+      'Michigan CSR not on file — will request. Niko OK waiting but prefers Illinois blocks first. Rate $270/hr for 8-week block.',
+      now() - interval '1 day'),
+    -- Omar Choi — Phoenix general
+    ('f0000001-0000-0000-0000-000000000114', ws, 'e0000001-0000-0000-0000-000000000025', NULL,
+      'Omar: IMLC compact (AZ, CO, IL). Open to Phoenix general anesthesia work. Rate $230/hr. Available immediately once contract signed.',
+      now() - interval '2 days'),
+    ('f0000001-0000-0000-0000-000000000115', ws, 'e0000001-0000-0000-0000-000000000025', NULL,
+      'Omar rate update: floated $240 per hour, will accept $235. Scheduling 6-week block in Arizona starting ' || to_char(CURRENT_DATE + 22, 'YYYY-MM-DD') || '.',
+      now() - interval '12 hours'),
+    -- Mira Abbas — Boston pediatric
+    ('f0000001-0000-0000-0000-000000000116', ws, 'e0000001-0000-0000-0000-000000000027', NULL,
+      'Mira: pediatric anesthesia background, Massachusetts-based. Target rate $270/hr. Available in Boston starting ' || to_char(CURRENT_DATE + 30, 'YYYY-MM-DD') || '.',
+      now() - interval '4 days'),
+    ('f0000001-0000-0000-0000-000000000117', ws, 'e0000001-0000-0000-0000-000000000027', NULL,
+      'Mira preference: strong interest in children''s hospital work. Rate closed at $265/hr. Scheduled for 12-week block.',
+      now() - interval '1 day'),
+    -- Priya Delgado — Atlanta cardiac
+    ('f0000001-0000-0000-0000-000000000118', ws, 'e0000001-0000-0000-0000-000000000029', NULL,
+      'Priya: CT anesthesia fellowship, IMLC-eligible (GA, TN). Rate $290/hr for Atlanta heart cases. Immunizations renewal in flight — expect clear in 2 weeks.',
+      now() - interval '3 days'),
+    ('f0000001-0000-0000-0000-000000000119', ws, 'e0000001-0000-0000-0000-000000000029', NULL,
+      'Priya accepted $285/hr. Scheduling open to Nashville as well since she''s Georgia + Tennessee licensed. Available ' || to_char(CURRENT_DATE + 14, 'YYYY-MM-DD') || '.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-00000000011a', ws, 'e0000001-0000-0000-0000-000000000029', NULL,
+      'Immunization follow-up: Priya''s titers drawn, results pending. Renewal paperwork submitted to Atlanta facility. No change to start date.',
+      now() - interval '6 hours'),
+    -- Quinn Erikson — Cleveland OB
+    ('f0000001-0000-0000-0000-00000000011b', ws, 'e0000001-0000-0000-0000-00000000002b', NULL,
+      'Quinn: OB specialist, Ohio-based. Prefers L&D-heavy assignments. Rate $245/hr. Not available weekends per prior conversation.',
+      now() - interval '2 days'),
+    ('f0000001-0000-0000-0000-00000000011c', ws, 'e0000001-0000-0000-0000-00000000002b', NULL,
+      'Quinn confirmed Cleveland start ' || to_char(CURRENT_DATE + 18, 'YYYY-MM-DD') || ' at $240 per hour. Monday-Friday only. 8-week block.',
+      now() - interval '1 day'),
+    -- Tariq Hart — Detroit cardiac
+    ('f0000001-0000-0000-0000-00000000011d', ws, 'e0000001-0000-0000-0000-00000000002f', NULL,
+      'Tariq: cardiac + heart transplant anesthesia background. IMLC-eligible. Rate $300/hr for complex CT cases. Michigan CSR active.',
+      now() - interval '3 days'),
+    ('f0000001-0000-0000-0000-00000000011e', ws, 'e0000001-0000-0000-0000-00000000002f', NULL,
+      'Rate conversation: Tariq accepted $295 per hour. Scheduling confirmation in process. Available ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || '.',
+      now() - interval '1 day'),
+    -- Sage Guzman — Philadelphia pain
+    ('f0000001-0000-0000-0000-00000000011f', ws, 'e0000001-0000-0000-0000-000000000031', NULL,
+      'Sage currently booked until ' || to_char(CURRENT_DATE + 7, 'YYYY-MM-DD') || '. After that available for Philadelphia pain clinic. Rate $250/hr.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-000000000120', ws, 'e0000001-0000-0000-0000-000000000031', NULL,
+      'Sage preference: Pennsylvania over New York for this block. Rate confirmed $250 per hour. 10-week commitment.',
+      now() - interval '4 hours'),
+    -- Diverse pay-band examples (low + high end)
+    ('f0000001-0000-0000-0000-000000000121', ws, 'e0000001-0000-0000-0000-000000000003', NULL,
+      'Blair Nguyen: OB anesthesia, Texas + Washington licenses. Board cert in renewal, ACLS current. Rate floor $200/hr. Available once board cert clears.',
+      now() - interval '2 days'),
+    ('f0000001-0000-0000-0000-000000000122', ws, 'e0000001-0000-0000-0000-00000000000b', NULL,
+      'Farah Taylor: California-only cardiac. Rate $325/hr for LA CT cases given scarcity. Immediate availability.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-000000000123', ws, 'e0000001-0000-0000-0000-000000000030', NULL,
+      'Niko Brennan Detroit pain coverage: IMLC covers Michigan. Rate band $650/hr given trauma case acuity. Available for 4-week trauma block.',
+      now() - interval '1 day'),
+    ('f0000001-0000-0000-0000-000000000124', ws, 'e0000001-0000-0000-0000-00000000000f', NULL,
+      'Sage: comfortable NY timeline, no urgency. Rate band $235-$255 per hour. Prefers Manhattan.',
+      now() - interval '3 days'),
+    ('f0000001-0000-0000-0000-000000000125', ws, 'e0000001-0000-0000-0000-000000000026', NULL,
+      'Yael Monroe: pain, Phoenix opportunity. Rate $215/hr floor. Colorado and Washington alternatives if Phoenix falls through.',
+      now() - interval '2 days'),
+    -- Newly-added providers: light footprint
+    ('f0000001-0000-0000-0000-000000000126', ws, 'e0000001-0000-0000-0000-000000000001', NULL,
+      'Intake note on NEW provider Zoe Alvarado (TX cardiac). Minimal credential set — background check pending. Rate target $230/hr pending full onboarding.',
+      now() - interval '4 days'),
+    ('f0000001-0000-0000-0000-000000000127', ws, 'e0000001-0000-0000-0000-000000000021', NULL,
+      'Intake note on NEW provider Ari Bello (FL ob). Still being onboarded, missing ACLS + immunizations. Tentative rate $225 per hour once cleared.',
+      now() - interval '6 days'),
+    ('f0000001-0000-0000-0000-000000000128', ws, 'e0000001-0000-0000-0000-000000000027', NULL,
+      'Intake note on NEW provider Bodhi Cho (MA pediatric). Background check + immunizations pending. Target rate $250/hr. Expected clear in 3 weeks.',
+      now() - interval '8 days')
+  ON CONFLICT (id) DO NOTHING;
+
+  -- ─── outreach_threads + outreach_messages ──────────────────────
+  -- One thread per active case (recipient_kind='provider'), with
+  -- 3-5 messages per thread spanning the full outreach flow:
+  -- initial send → follow-up → response-synthesis. Covers the
+  -- WS C conversations reader (reads outbound email history). The
+  -- thread's recipient_email matches the provider's email so
+  -- entity resolution lands on the seeded signal_providers row.
+  INSERT INTO outreach_threads (id, workspace_id, case_id, recipient_kind, recipient_name, recipient_email, recipient_phone, status, created_at)
+  VALUES
+    ('aa000001-0000-0000-0000-000000000001', ws, 'e0000001-0000-0000-0000-000000000001', 'provider', 'Alex Morgan',    'alex.morgan@signal-seed.test',    '512-555-0101', 'active',    now() - interval '10 days'),
+    ('aa000001-0000-0000-0000-000000000002', ws, 'e0000001-0000-0000-0000-000000000002', 'provider', 'Grey Umoren',    'grey.umoren@signal-seed.test',    '512-555-0107', 'active',    now() - interval '14 days'),
+    ('aa000001-0000-0000-0000-000000000006', ws, 'e0000001-0000-0000-0000-000000000006', 'provider', 'Devin Rivera',   'devin.rivera@signal-seed.test',   '206-555-0104', 'active',    now() - interval '18 days'),
+    ('aa000001-0000-0000-0000-000000000008', ws, 'e0000001-0000-0000-0000-000000000008', 'provider', 'Alex Morgan',    'alex.morgan@signal-seed.test',    '512-555-0101', 'active',    now() - interval '2 days'),
+    ('aa000001-0000-0000-0000-00000000000a', ws, 'e0000001-0000-0000-0000-00000000000a', 'provider', 'Jules Xavier',   'jules.xavier@signal-seed.test',   '206-555-0110', 'active',    now() - interval '5 days'),
+    ('aa000001-0000-0000-0000-00000000000d', ws, 'e0000001-0000-0000-0000-00000000000d', 'provider', 'Kai Yamamoto',   'kai.yamamoto@signal-seed.test',   '212-555-0111', 'active',    now() - interval '3 days'),
+    ('aa000001-0000-0000-0000-00000000000e', ws, 'e0000001-0000-0000-0000-00000000000e', 'provider', 'Uma Ibrahim',    'uma.ibrahim@signal-seed.test',    '212-555-0121', 'active',    now() - interval '8 days'),
+    ('aa000001-0000-0000-0000-000000000020', ws, 'e0000001-0000-0000-0000-000000000020', 'provider', 'Luna Zabala',    'luna.zabala@signal-seed.test',    '305-555-0112', 'active',    now() - interval '4 days'),
+    ('aa000001-0000-0000-0000-000000000022', ws, 'e0000001-0000-0000-0000-000000000022', 'provider', 'Niko Brennan',   'niko.brennan@signal-seed.test',   '312-555-0114', 'active',    now() - interval '6 days'),
+    ('aa000001-0000-0000-0000-000000000025', ws, 'e0000001-0000-0000-0000-000000000025', 'provider', 'Omar Choi',      'omar.choi@signal-seed.test',      '602-555-0115', 'active',    now() - interval '3 days'),
+    ('aa000001-0000-0000-0000-000000000027', ws, 'e0000001-0000-0000-0000-000000000027', 'provider', 'Mira Abbas',     'mira.abbas@signal-seed.test',     '617-555-0113', 'active',    now() - interval '7 days'),
+    ('aa000001-0000-0000-0000-000000000029', ws, 'e0000001-0000-0000-0000-000000000029', 'provider', 'Priya Delgado',  'priya.delgado@signal-seed.test',  '404-555-0116', 'active',    now() - interval '5 days'),
+    ('aa000001-0000-0000-0000-00000000002b', ws, 'e0000001-0000-0000-0000-00000000002b', 'provider', 'Quinn Erikson',  'quinn.erikson@signal-seed.test',  '216-555-0117', 'active',    now() - interval '4 days'),
+    ('aa000001-0000-0000-0000-00000000002f', ws, 'e0000001-0000-0000-0000-00000000002f', 'provider', 'Tariq Hart',     'tariq.hart@signal-seed.test',     '313-555-0120', 'active',    now() - interval '6 days'),
+    ('aa000001-0000-0000-0000-000000000031', ws, 'e0000001-0000-0000-0000-000000000031', 'provider', 'Sage Guzman',    'sage.guzman@signal-seed.test',    '215-555-0119', 'active',    now() - interval '3 days')
+  ON CONFLICT (id) DO NOTHING;
+
+  -- Outreach messages — 3-5 per thread, mix of email + SMS to show
+  -- multi-channel. Rich bodies with REGION / TIMING / RATE /
+  -- SUBSPECIALTY / AVAILABILITY tokens so the WS E extractor fires.
+  INSERT INTO outreach_messages (id, thread_id, workspace_id, channel, direction, template, body, sent_at, created_at)
+  VALUES
+    -- Alex Morgan (Austin cardiac) thread
+    ('ab000001-0000-0000-0000-000000000001', 'aa000001-0000-0000-0000-000000000001', ws, 'email', 'out', 'coverage_offer',
+      E'Hi Alex,\n\nI have a cardiac anesthesia opening at Austin Medical Center starting the week of ' || to_char(CURRENT_DATE + 21, 'Mon DD, YYYY') ||
+      E'. 7-on/7-off schedule, $240/hr. Is this a fit? Texas CSR must be current.\n\nThanks,\nRevanth',
+      now() - interval '9 days', now() - interval '9 days'),
+    ('ab000001-0000-0000-0000-000000000002', 'aa000001-0000-0000-0000-000000000001', ws, 'email', 'out', 'follow_up',
+      E'Hi Alex — following up on the Austin cardiac opening. Rate can move to $245/hr. Available starting ' || to_char(CURRENT_DATE + 21, 'YYYY-MM-DD') || E'.',
+      now() - interval '6 days', now() - interval '6 days'),
+    ('ab000001-0000-0000-0000-000000000003', 'aa000001-0000-0000-0000-000000000001', ws, 'email', 'out', 'rate_update',
+      E'Alex, CMO approved $255 per hour given the cardiothoracic case mix. Need confirmation this week to lock the start date.',
+      now() - interval '2 days', now() - interval '2 days'),
+    ('ab000001-0000-0000-0000-000000000004', 'aa000001-0000-0000-0000-000000000001', ws, 'sms', 'out', 'reminder',
+      E'Quick ping on the Austin cardiac offer — rate at $255/hr, start 3 weeks out. Let me know if we''re a go.',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Grey Umoren (Austin general) thread
+    ('ab000001-0000-0000-0000-000000000005', 'aa000001-0000-0000-0000-000000000002', ws, 'email', 'out', 'coverage_offer',
+      E'Hi Grey — Austin general anesthesia coverage opportunity. IMLC-friendly, Texas-based block. Rate $220/hr. Can you start in the next 30 days?',
+      now() - interval '13 days', now() - interval '13 days'),
+    ('ab000001-0000-0000-0000-000000000006', 'aa000001-0000-0000-0000-000000000002', ws, 'email', 'out', 'follow_up',
+      E'Grey, follow-up on the Texas general anesthesia role. Rate band $210-$230 per hour depending on case mix. Available immediately preferred.',
+      now() - interval '9 days', now() - interval '9 days'),
+    ('ab000001-0000-0000-0000-000000000007', 'aa000001-0000-0000-0000-000000000002', ws, 'email', 'out', 'response_synthesis',
+      E'Grey confirmed: Texas and Colorado coverage through Q1. Rate $220/hr. Available January through March. Needs TX CSR filed first.',
+      now() - interval '3 days', now() - interval '3 days'),
+    -- Devin Rivera (Seattle pain) thread
+    ('ab000001-0000-0000-0000-00000000000a', 'aa000001-0000-0000-0000-000000000006', ws, 'email', 'out', 'coverage_offer',
+      E'Devin — Seattle pain clinic coverage, Washington licensed. Rate $280/hr. Start ' || to_char(CURRENT_DATE + 14, 'YYYY-MM-DD') || E'. 10-day blocks, no weekends per your prior note.',
+      now() - interval '17 days', now() - interval '17 days'),
+    ('ab000001-0000-0000-0000-00000000000b', 'aa000001-0000-0000-0000-000000000006', ws, 'email', 'out', 'follow_up',
+      E'Devin — confirming Seattle pain opportunity. Rate holds at $285 per hour. California license noted. Available weekdays only.',
+      now() - interval '12 days', now() - interval '12 days'),
+    ('ab000001-0000-0000-0000-00000000000c', 'aa000001-0000-0000-0000-000000000006', ws, 'email', 'out', 'response_synthesis',
+      E'Devin confirmed: Seattle start ' || to_char(CURRENT_DATE + 14, 'YYYY-MM-DD') || E', chronic pain cases only, $285/hr. 10-day block through end of quarter.',
+      now() - interval '3 days', now() - interval '3 days'),
+    -- Alex Morgan (Nashville cardiac) — same provider, second thread
+    ('ab000001-0000-0000-0000-00000000000d', 'aa000001-0000-0000-0000-000000000008', ws, 'email', 'out', 'coverage_offer',
+      E'Alex — Nashville cardiac institute has a CT anesthesia opening. Tennessee covered via IMLC. Rate $265/hr. Start ' || to_char(CURRENT_DATE + 18, 'YYYY-MM-DD') || E'. Interested?',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Jules Xavier (LA pain) thread
+    ('ab000001-0000-0000-0000-00000000000e', 'aa000001-0000-0000-0000-00000000000a', ws, 'email', 'out', 'coverage_offer',
+      E'Jules — LA pain management opening. California active, rate $260/hr. Start ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || E'. Regional anesthesia preferred over OR.',
+      now() - interval '4 days', now() - interval '4 days'),
+    ('ab000001-0000-0000-0000-00000000000f', 'aa000001-0000-0000-0000-00000000000a', ws, 'email', 'out', 'rate_negotiation',
+      E'Jules, revised rate at $255/hr. Pain clinic work preferred — confirmed with facility. Looking at a 12-week block.',
+      now() - interval '2 days', now() - interval '2 days'),
+    ('ab000001-0000-0000-0000-000000000010', 'aa000001-0000-0000-0000-00000000000a', ws, 'sms', 'out', 'reminder',
+      E'Hi Jules — Los Angeles pain opportunity, start in 3 weeks. Need your yes to send paperwork.',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Kai Yamamoto (NY cardiac) thread
+    ('ab000001-0000-0000-0000-000000000011', 'aa000001-0000-0000-0000-00000000000d', ws, 'email', 'out', 'coverage_offer',
+      E'Kai — Manhattan CT anesthesia opportunity. Rate $305/hr for cardiothoracic case mix. Start ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || E'.',
+      now() - interval '2 days', now() - interval '2 days'),
+    ('ab000001-0000-0000-0000-000000000012', 'aa000001-0000-0000-0000-00000000000d', ws, 'email', 'out', 'follow_up',
+      E'Kai follow-up: NY CSR confirmed active, ACLS current. Lock rate at $300 per hour? 6-week block.',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Uma Ibrahim (NY general) thread
+    ('ab000001-0000-0000-0000-000000000013', 'aa000001-0000-0000-0000-00000000000e', ws, 'email', 'out', 'coverage_offer',
+      E'Uma — Manhattan general anesthesia. New York license. Rate $230/hr. Available immediately noted. Not OB per your preference.',
+      now() - interval '7 days', now() - interval '7 days'),
+    ('ab000001-0000-0000-0000-000000000014', 'aa000001-0000-0000-0000-00000000000e', ws, 'email', 'out', 'follow_up',
+      E'Uma, confirming rate at $225 per hour, general anesthesia only. Would you consider a Texas block later?',
+      now() - interval '4 days', now() - interval '4 days'),
+    ('ab000001-0000-0000-0000-000000000015', 'aa000001-0000-0000-0000-00000000000e', ws, 'email', 'out', 'response_synthesis',
+      E'Uma confirmed: Manhattan work through next quarter, $225/hr, general only. Open to Texas Q2 next year.',
+      now() - interval '2 days', now() - interval '2 days'),
+    -- Luna Zabala (Miami OB) thread
+    ('ab000001-0000-0000-0000-000000000016', 'aa000001-0000-0000-0000-000000000020', ws, 'email', 'out', 'coverage_offer',
+      E'Luna — Miami L&D coverage. Florida licensed. Rate $235/hr. Start ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || E'.',
+      now() - interval '3 days', now() - interval '3 days'),
+    ('ab000001-0000-0000-0000-000000000017', 'aa000001-0000-0000-0000-000000000020', ws, 'email', 'out', 'follow_up',
+      E'Luna — confirmed start, rate moving to $240 per hour. Georgia block available if Miami falls through.',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Niko Brennan (Chicago pain) thread
+    ('ab000001-0000-0000-0000-000000000018', 'aa000001-0000-0000-0000-000000000022', ws, 'email', 'out', 'coverage_offer',
+      E'Niko — Chicago pain clinic coverage. IMLC compact covers IL. Rate $275/hr. 8-week block starting ' || to_char(CURRENT_DATE + 15, 'YYYY-MM-DD') || E'.',
+      now() - interval '5 days', now() - interval '5 days'),
+    ('ab000001-0000-0000-0000-000000000019', 'aa000001-0000-0000-0000-000000000022', ws, 'email', 'out', 'follow_up',
+      E'Niko follow-up: Illinois first, Michigan if we file state CSR. Rate $270 per hour acceptable?',
+      now() - interval '2 days', now() - interval '2 days'),
+    -- Omar Choi (Phoenix general) thread
+    ('ab000001-0000-0000-0000-00000000001a', 'aa000001-0000-0000-0000-000000000025', ws, 'email', 'out', 'coverage_offer',
+      E'Omar — Phoenix general anesthesia block. Arizona IMLC active. Rate $230/hr. Start ' || to_char(CURRENT_DATE + 22, 'YYYY-MM-DD') || E'.',
+      now() - interval '2 days', now() - interval '2 days'),
+    ('ab000001-0000-0000-0000-00000000001b', 'aa000001-0000-0000-0000-000000000025', ws, 'email', 'out', 'rate_update',
+      E'Omar — bumped rate to $235 per hour. 6-week commitment for the Phoenix block.',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Mira Abbas (Boston pediatric) thread
+    ('ab000001-0000-0000-0000-00000000001c', 'aa000001-0000-0000-0000-000000000027', ws, 'email', 'out', 'coverage_offer',
+      E'Mira — Boston Metro children''s hospital anesthesia coverage. Massachusetts license. Rate $270/hr. Start ' || to_char(CURRENT_DATE + 30, 'YYYY-MM-DD') || E'. 12-week block.',
+      now() - interval '6 days', now() - interval '6 days'),
+    ('ab000001-0000-0000-0000-00000000001d', 'aa000001-0000-0000-0000-000000000027', ws, 'email', 'out', 'follow_up',
+      E'Mira — pediatric anesthesia + children''s hospital background is the perfect fit. Rate holding at $265 per hour.',
+      now() - interval '3 days', now() - interval '3 days'),
+    ('ab000001-0000-0000-0000-00000000001e', 'aa000001-0000-0000-0000-000000000027', ws, 'sms', 'out', 'reminder',
+      E'Hi Mira — Boston pediatric opening still open. Can we finalize this week?',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Priya Delgado (Atlanta cardiac) thread
+    ('ab000001-0000-0000-0000-00000000001f', 'aa000001-0000-0000-0000-000000000029', ws, 'email', 'out', 'coverage_offer',
+      E'Priya — Atlanta cardiac heart center opportunity. IMLC covers Georgia + Tennessee. Rate $290/hr. Start ' || to_char(CURRENT_DATE + 14, 'YYYY-MM-DD') || E'.',
+      now() - interval '4 days', now() - interval '4 days'),
+    ('ab000001-0000-0000-0000-000000000020', 'aa000001-0000-0000-0000-000000000029', ws, 'email', 'out', 'rate_negotiation',
+      E'Priya — settled $285 per hour. Immunization renewal in flight, clear in 2 weeks. No schedule impact.',
+      now() - interval '2 days', now() - interval '2 days'),
+    ('ab000001-0000-0000-0000-000000000021', 'aa000001-0000-0000-0000-000000000029', ws, 'email', 'out', 'response_synthesis',
+      E'Priya confirmed: Atlanta cardiac + Nashville overflow. $285/hr. Available ' || to_char(CURRENT_DATE + 14, 'YYYY-MM-DD') || E'.',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Quinn Erikson (Cleveland OB) thread
+    ('ab000001-0000-0000-0000-000000000022', 'aa000001-0000-0000-0000-00000000002b', ws, 'email', 'out', 'coverage_offer',
+      E'Quinn — Cleveland obstetric anesthesia, Ohio-based. Rate $245/hr. Start ' || to_char(CURRENT_DATE + 18, 'YYYY-MM-DD') || E'. Weekdays only per your note.',
+      now() - interval '3 days', now() - interval '3 days'),
+    ('ab000001-0000-0000-0000-000000000023', 'aa000001-0000-0000-0000-00000000002b', ws, 'email', 'out', 'follow_up',
+      E'Quinn — settled at $240 per hour. Monday-Friday L&D for 8 weeks. Pennsylvania backup if needed.',
+      now() - interval '1 day', now() - interval '1 day'),
+    -- Tariq Hart (Detroit cardiac) thread
+    ('ab000001-0000-0000-0000-000000000024', 'aa000001-0000-0000-0000-00000000002f', ws, 'email', 'out', 'coverage_offer',
+      E'Tariq — Detroit cardiac + heart transplant anesthesia opening. Michigan licensed, IMLC-eligible. Rate $300/hr for complex CT cases. Start ' || to_char(CURRENT_DATE + 20, 'YYYY-MM-DD') || E'.',
+      now() - interval '5 days', now() - interval '5 days'),
+    ('ab000001-0000-0000-0000-000000000025', 'aa000001-0000-0000-0000-00000000002f', ws, 'email', 'out', 'rate_update',
+      E'Tariq — accepted $295 per hour for 8-week block. Scheduling confirmation in progress.',
+      now() - interval '2 days', now() - interval '2 days'),
+    -- Sage Guzman (Philadelphia pain) thread
+    ('ab000001-0000-0000-0000-000000000026', 'aa000001-0000-0000-0000-000000000031', ws, 'email', 'out', 'coverage_offer',
+      E'Sage — Philadelphia pain clinic coverage, Pennsylvania licensed. Rate $250/hr. Booked until ' || to_char(CURRENT_DATE + 7, 'YYYY-MM-DD') || E', then 10-week block.',
+      now() - interval '2 days', now() - interval '2 days'),
+    ('ab000001-0000-0000-0000-000000000027', 'aa000001-0000-0000-0000-000000000031', ws, 'sms', 'out', 'reminder',
+      E'Sage — confirming Philly pain start week of ' || to_char(CURRENT_DATE + 7, 'YYYY-MM-DD') || E'. Rate holds at $250 per hour.',
+      now() - interval '4 hours', now() - interval '4 hours')
+  ON CONFLICT (id) DO NOTHING;
+
+  -- ─── worked case journeys: lifecycle transitions ───────────────
+  -- Flip a mix of cases to progressed statuses so the recruiter UI
+  -- has real "I''ve been here before" context. Use UPDATE to move
+  -- status + stamp submittedAt / completedAt / assignedSpecialistId
+  -- without destroying the original opened_at. case_status_events
+  -- below records the transitions.
+  UPDATE cases SET
+    status      = 'submitted',
+    submitted_at = now() - interval '2 days'
+    WHERE id = 'e0000001-0000-0000-0000-000000000001'; -- Austin cardiac (Alex Morgan)
+  UPDATE cases SET
+    status       = 'completed',
+    submitted_at = now() - interval '45 days',
+    completed_at = now() - interval '30 days'
+    WHERE id = 'e0000001-0000-0000-0000-000000000006'; -- Seattle pain (Devin Rivera) — wrapped assignment
+  UPDATE cases SET
+    status       = 'ready_for_review',
+    submitted_at = now() - interval '1 day'
+    WHERE id = 'e0000001-0000-0000-0000-000000000029'; -- Atlanta cardiac (Priya Delgado)
+  UPDATE cases SET
+    status       = 'awaiting_provider'
+    WHERE id = 'e0000001-0000-0000-0000-00000000002b'; -- Cleveland OB (Quinn Erikson)
+  UPDATE cases SET
+    status       = 'in_progress'
+    WHERE id = 'e0000001-0000-0000-0000-00000000000a'; -- LA pain (Jules Xavier)
+
+  INSERT INTO case_status_events (id, workspace_id, case_id, from_status, to_status, actor_user_id, actor_type, reason, created_at)
+  VALUES
+    -- Alex Morgan Austin: intake → in_progress → ready_for_review → submitted
+    ('ba000001-0000-0000-0000-000000000011', ws, 'e0000001-0000-0000-0000-000000000001', 'intake',           'in_progress',      NULL, 'system', 'provider accepted offer at $255/hr',          now() - interval '10 days'),
+    ('ba000001-0000-0000-0000-000000000012', ws, 'e0000001-0000-0000-0000-000000000001', 'in_progress',      'ready_for_review', NULL, 'system', 'packet assembled — awaiting specialist review', now() - interval '4 days'),
+    ('ba000001-0000-0000-0000-000000000013', ws, 'e0000001-0000-0000-0000-000000000001', 'ready_for_review', 'submitted',        NULL, 'system', 'packet submitted to Austin Medical Center',   now() - interval '2 days'),
+    -- Devin Rivera Seattle: completed journey
+    ('ba000001-0000-0000-0000-000000000061', ws, 'e0000001-0000-0000-0000-000000000006', 'intake',           'in_progress',      NULL, 'system', 'provider accepted — chronic pain focus',       now() - interval '70 days'),
+    ('ba000001-0000-0000-0000-000000000062', ws, 'e0000001-0000-0000-0000-000000000006', 'in_progress',      'ready_for_review', NULL, 'system', 'packet assembled',                             now() - interval '55 days'),
+    ('ba000001-0000-0000-0000-000000000063', ws, 'e0000001-0000-0000-0000-000000000006', 'ready_for_review', 'submitted',        NULL, 'system', 'submitted to Seattle Children',              now() - interval '45 days'),
+    ('ba000001-0000-0000-0000-000000000064', ws, 'e0000001-0000-0000-0000-000000000006', 'submitted',        'completed',        NULL, 'system', 'assignment wrapped — provider rolled off',    now() - interval '30 days'),
+    -- Priya Delgado Atlanta: intake → in_progress → ready_for_review
+    ('ba000001-0000-0000-0000-00000000029a', ws, 'e0000001-0000-0000-0000-000000000029', 'intake',           'in_progress',      NULL, 'system', 'offer accepted at $285/hr',                   now() - interval '3 days'),
+    ('ba000001-0000-0000-0000-00000000029b', ws, 'e0000001-0000-0000-0000-000000000029', 'in_progress',      'ready_for_review', NULL, 'system', 'immunization renewal in flight',              now() - interval '1 day'),
+    -- Quinn Erikson Cleveland: intake → awaiting_provider
+    ('ba000001-0000-0000-0000-00000000002b', ws, 'e0000001-0000-0000-0000-00000000002b', 'intake',           'awaiting_provider', NULL, 'system', 'awaiting provider signature on schedule',    now() - interval '1 day'),
+    -- Jules Xavier LA: intake → in_progress
+    ('ba000001-0000-0000-0000-0000000000aa', ws, 'e0000001-0000-0000-0000-00000000000a', 'intake',           'in_progress',      NULL, 'system', 'offer accepted — LA pain block',              now() - interval '2 days')
   ON CONFLICT (id) DO NOTHING;
 
 END $$;
@@ -542,3 +938,58 @@ FROM (
 WHERE sj.facility_id = sub.facility_id
   AND sub.state IS NOT NULL
   AND (sj.state IS NULL OR sj.state <> sub.state);
+
+-- ─── POST-INGEST: backfill signal_jobs.pay with varied bands ────────
+-- cases.pay doesn't exist, so ingest leaves pay NULL. We map each
+-- seeded case's external_id → signal_jobs.id via signal_source_lineage
+-- and set a spread of hourly rates ($200/hr … $650/hr) so the ranker's
+-- RATE_WITHIN_BAND facet lights up against varied job pay. Idempotent.
+WITH seed_pay(ext_id, pay) AS (
+  VALUES
+    ('e0000001-0000-0000-0000-000000000001'::text, 255.00),  -- Austin cardiac
+    ('e0000001-0000-0000-0000-000000000002'::text, 220.00),  -- Austin general
+    ('e0000001-0000-0000-0000-000000000003'::text, 215.00),  -- Austin OB
+    ('e0000001-0000-0000-0000-000000000004'::text, 265.00),  -- Denver pediatric
+    ('e0000001-0000-0000-0000-000000000005'::text, 240.00),  -- Denver OB
+    ('e0000001-0000-0000-0000-000000000006'::text, 285.00),  -- Seattle pain
+    ('e0000001-0000-0000-0000-000000000007'::text, 270.00),  -- Seattle pediatric
+    ('e0000001-0000-0000-0000-000000000008'::text, 265.00),  -- Nashville cardiac
+    ('e0000001-0000-0000-0000-000000000009'::text, 225.00),  -- Nashville general
+    ('e0000001-0000-0000-0000-00000000000a'::text, 255.00),  -- LA pain
+    ('e0000001-0000-0000-0000-00000000000b'::text, 325.00),  -- LA cardiac (scarcity premium)
+    ('e0000001-0000-0000-0000-00000000000c'::text, 260.00),  -- LA pain
+    ('e0000001-0000-0000-0000-00000000000d'::text, 305.00),  -- NY cardiac
+    ('e0000001-0000-0000-0000-00000000000e'::text, 230.00),  -- NY general
+    ('e0000001-0000-0000-0000-00000000000f'::text, 245.00),  -- NY pain
+    ('e0000001-0000-0000-0000-000000000020'::text, 240.00),  -- Miami OB
+    ('e0000001-0000-0000-0000-000000000021'::text, 225.00),  -- Miami OB 2
+    ('e0000001-0000-0000-0000-000000000022'::text, 275.00),  -- Chicago pain
+    ('e0000001-0000-0000-0000-000000000023'::text, 205.00),  -- Chicago general (low end)
+    ('e0000001-0000-0000-0000-000000000024'::text, 260.00),  -- Chicago pediatric
+    ('e0000001-0000-0000-0000-000000000025'::text, 235.00),  -- Phoenix general
+    ('e0000001-0000-0000-0000-000000000026'::text, 215.00),  -- Phoenix pain
+    ('e0000001-0000-0000-0000-000000000027'::text, 270.00),  -- Boston pediatric
+    ('e0000001-0000-0000-0000-000000000028'::text, 200.00),  -- Boston general (floor)
+    ('e0000001-0000-0000-0000-000000000029'::text, 285.00),  -- Atlanta cardiac
+    ('e0000001-0000-0000-0000-00000000002a'::text, 220.00),  -- Atlanta general
+    ('e0000001-0000-0000-0000-00000000002b'::text, 240.00),  -- Cleveland OB
+    ('e0000001-0000-0000-0000-00000000002c'::text, 265.00),  -- Cleveland pain
+    ('e0000001-0000-0000-0000-00000000002d'::text, 210.00),  -- Charlotte general
+    ('e0000001-0000-0000-0000-00000000002e'::text, 300.00),  -- Charlotte cardiac
+    ('e0000001-0000-0000-0000-00000000002f'::text, 295.00),  -- Detroit cardiac
+    ('e0000001-0000-0000-0000-000000000030'::text, 650.00),  -- Detroit pain (trauma premium top end)
+    ('e0000001-0000-0000-0000-000000000031'::text, 250.00),  -- Philadelphia pain
+    ('e0000001-0000-0000-0000-000000000032'::text, 235.00),  -- Philadelphia OB
+    ('e0000001-0000-0000-0000-000000000033'::text, 280.00),  -- extra Chicago pain
+    ('e0000001-0000-0000-0000-000000000034'::text, 260.00),  -- extra NY pediatric
+    ('e0000001-0000-0000-0000-000000000035'::text, 230.00)   -- extra Miami OB
+)
+UPDATE signal_jobs sj
+SET pay = sub.pay
+FROM seed_pay sub
+JOIN signal_source_lineage sl
+  ON sl.canonical_table = 'signal_jobs'
+ AND sl.external_system = 'roster-internal'
+ AND sl.external_id     = sub.ext_id
+WHERE sj.id = sl.canonical_id
+  AND (sj.pay IS NULL OR sj.pay::numeric <> sub.pay);
