@@ -24,6 +24,7 @@ import { providerRoutes } from "./routes/provider.js";
 import { providerMeRoutes } from "./routes/providerMe.js";
 import { referenceRoutes } from "./routes/reference.js";
 import { signalRoutes } from "./routes/signal.js";
+import { signalContextRoutes } from "./routes/signalContext.js";
 import { supportRoutes } from "./routes/support.js";
 // 🧪 TEST API — only mounted when TEST_API_ENABLED=true (compose.test.yml).
 // See routes/testApi.ts for the double-gate.
@@ -83,6 +84,7 @@ export function buildApp(): Hono<ApiBindings> {
   // tenant hasn't been whitelisted; the routes themselves only need to
   // resolve the workspace from `c.var.auth`.
   app.route("/", signalRoutes);
+  app.route("/", signalContextRoutes);
   if (process.env.TEST_API_ENABLED === "true") {
     // Mount the test-only /test/* routes behind the gate. Handlers
     // ALSO recheck the env on every request so the mount doesn't

@@ -23,7 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # pgvector-enabled Postgres — migration 0026 enables the
+        # `vector` extension for the Signal agency-context KB; the
+        # stock postgres:16 image does not ship it.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: cred
           POSTGRES_PASSWORD: cred
@@ -104,7 +107,10 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # pgvector-enabled Postgres — migration 0026 enables the
+        # `vector` extension for the Signal agency-context KB; the
+        # stock postgres:16 image does not ship it.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: cred
           POSTGRES_PASSWORD: cred

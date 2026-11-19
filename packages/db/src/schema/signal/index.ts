@@ -8,3 +8,8 @@ export * from "./overrides.js";
 export * from "./sourceLineage.js";
 export * from "./weights.js";
 export * from "./evalRuns.js";
+export * from "./workspaceConfig.js";
+export * from "./knowledgeDocuments.js";
+export * from "./knowledgeChunks.js";
+export * from "./adapterCredentials.js";
+export * from "./onboardingGaps.js";
