@@ -183,6 +183,13 @@
       "when": 1762531440000,
       "tag": "0025_signal_conversation_body_and_extract_idempotency",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1762531500000,
+      "tag": "0026_signal_agency_context",
+      "breakpoints": true
     }
   ]
 }
