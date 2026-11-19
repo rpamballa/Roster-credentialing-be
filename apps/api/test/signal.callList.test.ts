@@ -274,6 +274,14 @@ describe("Signal · specialist call-list", () => {
     // License states enriched for Alice.
     const alice = body.providers.find((p) => p.id === seed.aliceId)!;
     expect(alice.licenseStates).toEqual(expect.arrayContaining(["MA", "NY"]));
+    // Match score is a 0-100 INTEGER percent — the FE formatter just
+    // appends `%`, so we assert the shape here. First-dogfood had the
+    // chip rendering 2400%; the normalization lives in this route.
+    for (const p of body.providers) {
+      expect(Number.isInteger(p.matchScore)).toBe(true);
+      expect(p.matchScore).toBeGreaterThanOrEqual(0);
+      expect(p.matchScore).toBeLessThanOrEqual(100);
+    }
   });
 
   it("classifies engagement from conversation recency + volume", async () => {
