@@ -436,12 +436,40 @@ signalRoutes.get(
       countLast7d: number;
       countLast14d: number;
       countLast30d: number;
+      /**
+       * Conversation counts bucketed by calendar month for the last 6
+       * months — index 0 = 5 months ago, index 5 = current month. Used
+       * by the FE sentiment-trend shim so the bar chart renders honest
+       * per-month volumes rather than a flat zero.
+       */
+      monthlyCounts: number[];
+      /** Total conversations observed for this provider (any age). */
+      totalCount: number;
     }
     const convoAggByProvider = new Map<string, ConvoAgg>();
     const now = Date.now();
     const d7 = 7 * 24 * 60 * 60 * 1000;
     const d14 = 14 * 24 * 60 * 60 * 1000;
     const d30 = 30 * 24 * 60 * 60 * 1000;
+    // 6-month calendar anchors. `monthStarts[i]` is the first instant
+    // of the i'th bucket (i=0 oldest, i=5 current). Keep them in UTC
+    // so the bucket boundaries don't shift with the API server's TZ.
+    const nowDate = new Date();
+    const monthStarts: number[] = [];
+    for (let i = 5; i >= 0; i--) {
+      monthStarts.push(
+        Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth() - i, 1, 0, 0, 0, 0),
+      );
+    }
+    const monthEndExclusive = Date.UTC(
+      nowDate.getUTCFullYear(),
+      nowDate.getUTCMonth() + 1,
+      1,
+      0,
+      0,
+      0,
+      0,
+    );
     for (const r of convoRows) {
       if (!r.providerId) continue;
       const agg = convoAggByProvider.get(r.providerId) ?? {
@@ -450,16 +478,36 @@ signalRoutes.get(
         countLast7d: 0,
         countLast14d: 0,
         countLast30d: 0,
+        monthlyCounts: [0, 0, 0, 0, 0, 0],
+        totalCount: 0,
       };
       // First row for this provider (ordered DESC) is the most recent.
       if (r.occurredAt > agg.lastAt) {
         agg.lastAt = r.occurredAt;
         agg.lastChannel = r.channel;
       }
-      const age = now - r.occurredAt.getTime();
+      const t = r.occurredAt.getTime();
+      const age = now - t;
       if (age <= d7) agg.countLast7d += 1;
       if (age <= d14) agg.countLast14d += 1;
       if (age <= d30) agg.countLast30d += 1;
+      agg.totalCount += 1;
+      // Month-bucket assignment — only rows inside the 6-month window
+      // land in `monthlyCounts`. Everything older still contributes to
+      // `totalCount` so the FE's confidence-tier count stays honest.
+      const firstMonthStart = monthStarts[0] ?? 0;
+      if (t >= firstMonthStart && t < monthEndExclusive) {
+        let bucket = 0;
+        for (let i = monthStarts.length - 1; i >= 0; i--) {
+          const start = monthStarts[i];
+          if (start !== undefined && t >= start) {
+            bucket = i;
+            break;
+          }
+        }
+        const prev = agg.monthlyCounts[bucket] ?? 0;
+        agg.monthlyCounts[bucket] = prev + 1;
+      }
       convoAggByProvider.set(r.providerId, agg);
     }
 
@@ -481,12 +529,22 @@ signalRoutes.get(
       npi: string | null;
       specialty: string;
       subSpecialty: string | null;
+      /**
+       * Match score as a 0-100 INTEGER percent. The raw ranker score
+       * (sum of weighted facet points, ~0-50 in practice) is clamped
+       * and rounded here so the FE's chip can just append `%` without
+       * additional math — see the first-dogfood "2400%" bug.
+       */
       matchScore: number;
       homeState: string | null;
       licenseStates: string[];
       lastConversationAt: string | null;
       bestChannel: string | null;
       engagement: "warming" | "active" | "cooling" | "dormant";
+      /** Count of conversations per calendar month, last 6 (oldest→newest). */
+      monthlyConversationCounts: number[];
+      /** Total conversations observed across all history. */
+      conversationCount: number;
       topJobId: string;
       earliestStartDate: string | null;
     }
@@ -512,12 +570,18 @@ signalRoutes.get(
         npi: provider.npi,
         specialty,
         subSpecialty,
-        matchScore: best.score,
+        // Raw ranker score → 0-100 integer percent. Clamp first, then
+        // round so a near-zero negative (post-mismatch penalty) lands
+        // on 0% and anything above the practical ~50 cap still shows
+        // as 100% rather than wrapping.
+        matchScore: Math.max(0, Math.min(100, Math.round(best.score))),
         homeState,
         licenseStates,
         lastConversationAt: convoAgg ? convoAgg.lastAt.toISOString() : null,
         bestChannel: convoAgg ? convoAgg.lastChannel : null,
         engagement,
+        monthlyConversationCounts: convoAgg ? convoAgg.monthlyCounts.slice() : [0, 0, 0, 0, 0, 0],
+        conversationCount: convoAgg ? convoAgg.totalCount : 0,
         topJobId: best.jobId,
         earliestStartDate: best.earliestStartDate,
       });
