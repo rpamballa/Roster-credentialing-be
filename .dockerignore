@@ -1,0 +1,36 @@
+# Keep the build context small — the full monorepo weighs several GB
+# when parallel-agent worktrees + local node_modules are on disk, and
+# shipping them to the builder (and then re-installing inside the
+# image) is pure waste. Everything the Dockerfile needs is copied
+# explicitly in the build stage.
+
+node_modules
+**/node_modules
+
+# Local parallel-agent worktrees — each is a full copy of the repo.
+.claude
+.claude-plugin
+.claude-mem
+
+.git
+.github
+.vscode
+.idea
+.DS_Store
+
+# Build/test artifacts
+dist
+build
+coverage
+.turbo
+.cache
+
+# Logs & editor caches
+*.log
+*.swp
+.history
+
+# Local env files — the container reads env from compose.
+.env
+.env.local
+.env.*.local

@@ -8,8 +8,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./adapters": "./src/adapters/types.ts",
+    "./adapters/contract": "./src/adapters/contract.ts",
+    "./adapters/registry": "./src/adapters/registry.ts",
     "./readers": "./src/readers/index.ts",
     "./runner": "./src/runner.ts",
+    "./scheduler": "./src/scheduler.ts",
     "./gaps": "./src/gaps.ts"
   },
   "scripts": {
@@ -18,6 +21,7 @@
   },
   "dependencies": {
     "@cred/db": "workspace:*",
+    "@cred/observability": "workspace:*",
     "@cred/signal-core": "workspace:*",
     "@cred/signal-cred-bridge": "workspace:*",
     "@cred/signal-extracts": "workspace:*",

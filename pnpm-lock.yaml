@@ -56,6 +56,9 @@ importers:
       '@cred/signal-extracts':
         specifier: workspace:*
         version: link:../../packages/signal-extracts
+      '@cred/signal-ingest':
+        specifier: workspace:*
+        version: link:../../packages/signal-ingest
       '@cred/signal-knowledge':
         specifier: workspace:*
         version: link:../../packages/signal-knowledge
@@ -401,6 +404,9 @@ importers:
       '@cred/db':
         specifier: workspace:*
         version: link:../db
+      '@cred/observability':
+        specifier: workspace:*
+        version: link:../observability
       '@cred/signal-core':
         specifier: workspace:*
         version: link:../signal-core
