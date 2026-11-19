@@ -105,12 +105,20 @@ export function mountAdapterRoutes(signalRoutes: Hono<ApiBindings>): void {
   // Manual trigger — the onboarding UI's "sync now" button and the
   // crontab's single-adapter cron hook both call this.
   // TODO(perm): require signal.write once the permission model lands.
+  //
+  // Status policy: we return 200 for every structured response and
+  // let the client branch on `result.ok` + `result.notImplemented`.
+  // A 5xx on these routes gets intercepted by Cloudflare's edge and
+  // the structured body (which carries the required-credentials
+  // diagnostics the onboarding UI needs) never reaches the browser.
+  // Unknown adapters still 404, and genuine handler crashes still
+  // propagate to the generic error middleware.
   signalRoutes.post("/v1/signal/adapters/:adapter/sync", async (c) => {
     const { workspaceId } = c.var.signalTenancy;
     const adapter = c.req.param("adapter");
     try {
       const result: RunOnceResult = await runOnce({ workspaceId, adapter });
-      return c.json(result, result.ok ? 200 : 502);
+      return c.json(result);
     } catch (err: unknown) {
       if (err instanceof UnknownAdapterError) {
         return notFound(c, err.message);
@@ -123,12 +131,13 @@ export function mountAdapterRoutes(signalRoutes: Hono<ApiBindings>): void {
   //
   // Dry-run; returns the AdapterPreview without touching signal_*.
   // Safe to call repeatedly; onboarding UI calls on every page load.
+  // Same status policy as /sync above.
   signalRoutes.post("/v1/signal/adapters/:adapter/preview", async (c) => {
     const { workspaceId } = c.var.signalTenancy;
     const adapter = c.req.param("adapter");
     try {
       const result = await previewAdapter({ workspaceId, adapter });
-      return c.json(result, result.ok ? 200 : 502);
+      return c.json(result);
     } catch (err: unknown) {
       if (err instanceof UnknownAdapterError) {
         return notFound(c, err.message);
