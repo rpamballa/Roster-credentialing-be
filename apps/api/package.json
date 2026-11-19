@@ -21,6 +21,7 @@
     "@cred/signal-eval": "workspace:*",
     "@cred/signal-explain": "workspace:*",
     "@cred/signal-extracts": "workspace:*",
+    "@cred/signal-ingest": "workspace:*",
     "@cred/signal-knowledge": "workspace:*",
     "@cred/signal-learn": "workspace:*",
     "@cred/signal-match": "workspace:*",

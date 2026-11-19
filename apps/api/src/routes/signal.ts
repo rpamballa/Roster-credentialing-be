@@ -29,6 +29,7 @@ import { zValidator } from "@hono/zod-validator";
 import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
+import { mountAdapterRoutes } from "./signal/adapters.js";
 import type { ApiBindings } from "../types.js";
 
 // Default eval fixture resolves relative to this file at build time
@@ -101,6 +102,12 @@ export const signalRoutes = new Hono<ApiBindings>();
 
 // All Signal routes share the same tenancy guard.
 signalRoutes.use("/v1/signal/*", requireSignalTenancy);
+
+// Ingestion framework HTTP surface — `/v1/signal/adapters/*`. Mounted
+// here so the tenancy middleware above still fires for every call;
+// the implementation lives in `signal/adapters.ts` to keep this file
+// focused on the core engine routes.
+mountAdapterRoutes(signalRoutes);
 
 // ─── GET /v1/signal/jobs ──────────────────────────────────────────────────
 //
