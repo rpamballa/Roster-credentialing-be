@@ -83,3 +83,30 @@ export {
   runAllDue,
   runOnce,
 } from "./scheduler.js";
+
+// ─── Agency onboarding (declarative config → applied state) ────────
+//
+// `scripts/signal-onboard.ts` is the only consumer today. Exposing
+// the schema + credential resolver here keeps the FE BFF and any
+// future onboarding wizard able to validate files before writing them.
+export {
+  type AdapterConfig,
+  type AgencyConfig,
+  type ConfigEntry,
+  type CredentialSource,
+  type KnowledgeDocConfig,
+  type OnboardingGapConfig,
+  type ResolveOptions,
+  type SpecialistConfig,
+  AgencyConfigError,
+  CredentialResolutionError,
+  adapterConfigSchema,
+  agencyConfigSchema,
+  configEntrySchema,
+  credentialSourceSchema,
+  knowledgeDocSchema,
+  onboardingGapSchema,
+  parseAgencyConfig,
+  resolveCredentials,
+  specialistSchema,
+} from "./onboarding/index.js";

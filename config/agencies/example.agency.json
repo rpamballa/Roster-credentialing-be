@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "agency": {
+    "slug": "example-locum",
+    "name": "Example Locum Agency",
+    "type": "agency",
+    "signalEnabled": true
+  },
+  "specialists": [
+    {
+      "email": "sam.specialist@example-locum.com",
+      "name": "Sam Specialist",
+      "role": "owner"
+    },
+    {
+      "email": "jordan.specialist@example-locum.com",
+      "name": "Jordan Specialist",
+      "role": "specialist"
+    }
+  ],
+  "config": [
+    {
+      "scope": "agency",
+      "key": "profile",
+      "value": {
+        "specialties": ["Anesthesiology", "CRNA"],
+        "rateBand": { "minUsdPerHour": 180, "maxUsdPerHour": 260 },
+        "regionPreferences": ["US-Southeast", "US-Mountain"]
+      }
+    },
+    {
+      "scope": "callList",
+      "key": "defaultFilters",
+      "value": {
+        "engagement": ["active", "warming"],
+        "minMatchScore": 65
+      }
+    }
+  ],
+  "knowledge": [
+    {
+      "title": "Intake playbook — new anesthesia requisition",
+      "bodyMarkdown": "# Intake playbook\n\nWhen a new requisition lands:\n\n1. Confirm start date and length-of-assignment with the facility contact.\n2. Validate the state license requirement and whether the facility accepts IMLC.\n3. Open at least two providers from the top-10 call-list within 24 hours.\n\n**Red flags:** CRNA-independent states vs. MD-supervised, weekend-only shifts, housing stipend ambiguity.",
+      "tags": ["intake", "anesthesia", "playbook"]
+    },
+    {
+      "title": "Rate-band policy — 2026 Q1",
+      "bodyMarkdown": "Current floor: $180/hr for general anesthesia, $200/hr for cardiac. Hold the floor unless the facility pre-negotiates with the agency lead.",
+      "tags": ["rates", "policy"]
+    }
+  ],
+  "adapters": {
+    "roster-internal": {
+      "enabled": true,
+      "credentials": {
+        "source": "inline",
+        "values": { "token": "not-used" }
+      },
+      "runOnBootstrap": { "preview": true, "sync": true }
+    },
+    "bullhorn": {
+      "enabled": false,
+      "config": {
+        "restUrl": "https://rest91.bullhornstaffing.com/rest-services/XXXX",
+        "loginUrl": "https://auth.bullhornstaffing.com"
+      }
+    },
+    "gmail": {
+      "enabled": false,
+      "config": {
+        "userEmail": "signal@example-locum.com"
+      }
+    }
+  },
+  "gaps": [
+    {
+      "title": "Bullhorn adapter not yet implemented",
+      "bodyMarkdown": "Agency uses Bullhorn Staffing; Signal's Bullhorn adapter is a stub. Target: real adapter before go-live. Owner: eng.",
+      "status": "open"
+    },
+    {
+      "title": "Gmail adapter not yet implemented",
+      "bodyMarkdown": "Agency uses Google Workspace for recruiter email. Signal's Gmail adapter is a stub. Target: real adapter before go-live. Owner: eng.",
+      "status": "open"
+    }
+  ]
+}
