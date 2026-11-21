@@ -3,6 +3,7 @@ import { onError } from "./middleware/errors.js";
 import { rateLimit } from "./middleware/rateLimit.js";
 import { requestContext } from "./middleware/requestContext.js";
 import { sessionLoader } from "./middleware/session.js";
+import { signalKillSwitch } from "./middleware/signalKillSwitch.js";
 import { requireTenancy } from "./middleware/tenancy.js";
 import { authRoutes } from "./routes/auth.js";
 import { caseRoutes } from "./routes/cases.js";
@@ -22,6 +23,8 @@ import { packetRoutes } from "./routes/packet.js";
 import { providerRoutes } from "./routes/provider.js";
 import { providerMeRoutes } from "./routes/providerMe.js";
 import { referenceRoutes } from "./routes/reference.js";
+import { signalRoutes } from "./routes/signal.js";
+import { signalContextRoutes } from "./routes/signalContext.js";
 import { supportRoutes } from "./routes/support.js";
 // 🧪 TEST API — only mounted when TEST_API_ENABLED=true (compose.test.yml).
 // See routes/testApi.ts for the double-gate.
@@ -34,6 +37,13 @@ export function buildApp(): Hono<ApiBindings> {
 
   app.use("*", requestContext);
   app.use("*", sessionLoader);
+  // Signal kill switch: for `/v1/signal/*` paths only, short-circuits
+  // with 404 when SIGNAL_SERVICES_ENABLED=false and 503 when the
+  // resolved workspace has `signal_enabled=false`. Non-Signal paths
+  // pass through untouched. Must run AFTER sessionLoader (so it can
+  // see the workspace on `c.var.auth`) and BEFORE any `/v1/signal/*`
+  // route is mounted.
+  app.use("*", signalKillSwitch);
   app.onError(onError);
 
   app.route("/", healthRoutes);
@@ -69,6 +79,12 @@ export function buildApp(): Hono<ApiBindings> {
   app.route("/", metricsRoutes);
   app.route("/", marketingLeadRoutes);
   app.route("/", supportRoutes);
+  // Roster Signal · WS A core engine. The kill-switch middleware above
+  // short-circuits these paths when SIGNAL_SERVICES_ENABLED is off or the
+  // tenant hasn't been whitelisted; the routes themselves only need to
+  // resolve the workspace from `c.var.auth`.
+  app.route("/", signalRoutes);
+  app.route("/", signalContextRoutes);
   if (process.env.TEST_API_ENABLED === "true") {
     // Mount the test-only /test/* routes behind the gate. Handlers
     // ALSO recheck the env on every request so the mount doesn't

@@ -1,0 +1,1267 @@
+// Roster Signal · WS A core engine · HTTP surface.
+//
+// The routes here are gated by two upstream layers already wired in
+// `app.ts`:
+//   - `signalKillSwitch` short-circuits with 404 when
+//     SIGNAL_SERVICES_ENABLED is false and 503 when the resolved
+//     workspace's `signal_enabled` column is false.
+//   - `sessionLoader` populates `c.var.auth`.
+//
+// This file adds a thin `requireSignalTenancy` step that resolves the
+// current workspace from the auth payload, 401s when no session is
+// present, and 403s when the session doesn't have a workspace to act
+// on. Every handler reads the tenant from `c.var.signalTenancy` so
+// cross-tenant leaks have to go through a tenancy helper that's part
+// of the review checklist.
+
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { db, schema } from "@cred/db";
+import { withWorkspace } from "@cred/db/signal";
+import type { ConsentApiTarget } from "@cred/db/signal";
+import { lineageForCanonical, recordLineage, validateConsentTransition } from "@cred/db/signal";
+import { logger } from "@cred/observability";
+import { loadFixture, runEval } from "@cred/signal-eval";
+import { runExtracts } from "@cred/signal-extracts";
+import { readWeights } from "@cred/signal-learn";
+import { rankJobCandidates, rankProviderOpenings } from "@cred/signal-match";
+import { zValidator } from "@hono/zod-validator";
+import { and, asc, desc, eq, gte, inArray, isNotNull, lte, sql } from "drizzle-orm";
+import { type Context, Hono } from "hono";
+import { z } from "zod";
+import { mountAdapterRoutes } from "./signal/adapters.js";
+import { mountTeamRoutes } from "./signal/team.js";
+import type { ApiBindings } from "../types.js";
+
+// Default eval fixture resolves relative to this file at build time
+// so it survives bundling and tsx runs alike. The path is a package
+// path under the monorepo root; the API process only ever reads it.
+const DEFAULT_EVAL_FIXTURE_PATH = fileURLToPath(
+  new URL("../../../../packages/signal-eval/fixtures/known-reqs-v0.json", import.meta.url),
+);
+
+declare module "hono" {
+  interface ContextVariableMap {
+    signalTenancy: { workspaceId: string };
+  }
+}
+
+function unauthorized(c: Context<ApiBindings>): Response {
+  return c.json(
+    { type: "about:blank", title: "Unauthorized", status: 401, instance: c.var.requestId },
+    401,
+  );
+}
+
+function forbidden(c: Context<ApiBindings>, detail: string): Response {
+  return c.json(
+    {
+      type: "about:blank",
+      title: "Forbidden",
+      status: 403,
+      detail,
+      instance: c.var.requestId,
+    },
+    403,
+  );
+}
+
+function notFound(c: Context<ApiBindings>): Response {
+  return c.json(
+    { type: "about:blank", title: "Not Found", status: 404, instance: c.var.requestId },
+    404,
+  );
+}
+
+/**
+ * Resolve the Signal tenant from whatever session the request carries.
+ * Staff sessions use the active workspace; provider sessions use the
+ * case's workspace. Missing session → 401; session without a workspace
+ * → 403. Non-Signal routes don't touch this middleware.
+ */
+async function requireSignalTenancy(
+  c: Context<ApiBindings>,
+  next: () => Promise<void>,
+): Promise<Response | undefined> {
+  const auth = c.var.auth;
+  if (!auth) return unauthorized(c);
+  let workspaceId: string | undefined;
+  if (auth.session.kind === "staff") {
+    workspaceId = auth.session.activeWorkspaceId ?? undefined;
+  } else if (auth.session.kind === "provider") {
+    workspaceId = auth.session.caseWorkspaceId ?? undefined;
+  }
+  if (!workspaceId) {
+    return forbidden(c, "No workspace on session.");
+  }
+  c.set("signalTenancy", { workspaceId });
+  await next();
+  return undefined;
+}
+
+export const signalRoutes = new Hono<ApiBindings>();
+
+// All Signal routes share the same tenancy guard.
+signalRoutes.use("/v1/signal/*", requireSignalTenancy);
+
+// Ingestion framework HTTP surface — `/v1/signal/adapters/*`. Mounted
+// here so the tenancy middleware above still fires for every call;
+// the implementation lives in `signal/adapters.ts` to keep this file
+// focused on the core engine routes.
+mountAdapterRoutes(signalRoutes);
+
+// Team view HTTP surface — `/v1/signal/team`. Serves the FE's hub-and-
+// spoke specialist → provider network. Implementation lives in
+// `signal/team.ts`.
+mountTeamRoutes(signalRoutes);
+
+// ─── GET /v1/signal/jobs ──────────────────────────────────────────────────
+//
+// List open requisitions in the current workspace for the daily landing
+// view (Mode A: `/cockpit/signal`, Mode B: `/signal`). Replaces the
+// FE-side `?jobIds=a,b,c` workaround — the landing page can now ask the
+// BE for "what's open today" without curating a list first.
+//
+// Default filter (what the FE lands on):
+//   - `req_opened_at IS NOT NULL` — WS C's partial ingest leaves some
+//     rows without an `req_opened_at`; those aren't real open reqs yet,
+//     so we skip them.
+//   - `need_date >= today (UTC)` — expired reqs drop off automatically.
+//   - `state IS NOT NULL` — the ranker's license-lane projection keys
+//     off state; rows without it would never match a provider.
+// Default sort: `need_date ASC` (most urgent first), with `req_opened_at
+// DESC` as a stable tie-breaker so two jobs with the same need-date
+// come back in insertion order.
+// Default limit: 50. Max 200. `limit=0` is not accepted — the caller
+// should omit the param if they want the default.
+//
+// Query filters (all optional, all AND-ed):
+//   - `?specialty=cardiac`
+//   - `?state=MA`
+//   - `?needBefore=YYYY-MM-DD` — upper bound on need_date (inclusive)
+//   - `?needAfter=YYYY-MM-DD` — lower bound on need_date (inclusive);
+//     overrides the "today" default when supplied.
+//
+// Tenancy is handled by `requireSignalTenancy` above; the kill switch
+// handles 404/503 for SIGNAL_SERVICES_ENABLED and per-workspace
+// `signal_enabled`.
+const JobsListQuery = z.object({
+  specialty: z.string().trim().min(1).max(200).optional(),
+  state: z.string().trim().min(1).max(50).optional(),
+  needBefore: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  needAfter: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+});
+
+signalRoutes.get("/v1/signal/jobs", zValidator("query", JobsListQuery), async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const q = c.req.valid("query");
+  const limit = q.limit ?? 50;
+
+  // Need-date lower bound: `?needAfter` wins when supplied; otherwise
+  // the default is "today (UTC)" so expired reqs fall off. Need-date
+  // columns are stored as PG `date` — compare via YYYY-MM-DD strings
+  // so we don't trip on local-timezone off-by-ones.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const needAfter = q.needAfter ?? todayIso;
+
+  const predicates = [
+    eq(schema.signalJobs.workspaceId, workspaceId),
+    isNotNull(schema.signalJobs.reqOpenedAt),
+    isNotNull(schema.signalJobs.state),
+    isNotNull(schema.signalJobs.needDate),
+    gte(schema.signalJobs.needDate, needAfter),
+  ];
+  if (q.needBefore) {
+    predicates.push(lte(schema.signalJobs.needDate, q.needBefore));
+  }
+  if (q.specialty) {
+    predicates.push(eq(schema.signalJobs.specialty, q.specialty));
+  }
+  if (q.state) {
+    predicates.push(eq(schema.signalJobs.state, q.state));
+  }
+
+  const rows = await db()
+    .select({
+      id: schema.signalJobs.id,
+      facilityId: schema.signalJobs.facilityId,
+      specialty: schema.signalJobs.specialty,
+      needDate: schema.signalJobs.needDate,
+      state: schema.signalJobs.state,
+      reqOpenedAt: schema.signalJobs.reqOpenedAt,
+    })
+    .from(schema.signalJobs)
+    .where(and(...predicates))
+    .orderBy(asc(schema.signalJobs.needDate), desc(schema.signalJobs.reqOpenedAt))
+    .limit(limit);
+
+  // `total` is a count of what _would_ match the same filter if the
+  // limit were lifted — the FE uses it to show "showing N of total"
+  // when pagination lands. We run it as a separate COUNT so the row
+  // payload stays small; Postgres evaluates the predicate once per
+  // request either way.
+  const totalRows = await db()
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.signalJobs)
+    .where(and(...predicates));
+  const total = totalRows[0]?.n ?? 0;
+
+  return c.json({
+    jobs: rows.map((r) => ({
+      id: r.id,
+      facilityId: r.facilityId,
+      specialty: r.specialty,
+      // need_date is `date`, drizzle returns YYYY-MM-DD already.
+      needDate: r.needDate,
+      state: r.state,
+      reqOpenedAt: r.reqOpenedAt.toISOString(),
+    })),
+    total,
+    limit,
+  });
+});
+
+// ─── GET /v1/signal/specialist/call-list ──────────────────────────────────
+//
+// The specialist's dedup'd ranked call list — providers ordered by the
+// best score they hold across the workspace's open reqs. Powers the
+// new deck-spec /signal/providers surface (one provider per row, not
+// one job per row).
+//
+// v0 shim: fan out across the workspace's top-N open reqs via the
+// existing `rankJobCandidates` engine, then dedup by providerId
+// keeping each provider's best (score, jobId). This reuses the
+// snapshotted rankings when `rankJobCandidates` has already written
+// one today, so the surface is cheap to re-open.
+//
+// TODO (follow-up): a native "rank providers across all open reqs"
+// pass in signal-match would avoid the fan-out. Today's shim is fine
+// for the scale we ship on (≤ 50 open reqs per workspace).
+const CallListQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  specialty: z.string().trim().min(1).max(200).optional(),
+  state: z.string().trim().min(1).max(50).optional(),
+  engagement: z.enum(["warming", "active", "cooling", "dormant"]).optional(),
+  /** Internal knob: how many open reqs to scan under the hood. */
+  jobsScanned: z.coerce.number().int().min(1).max(50).optional(),
+});
+
+signalRoutes.get(
+  "/v1/signal/specialist/call-list",
+  zValidator("query", CallListQuery),
+  async (c) => {
+    const { workspaceId } = c.var.signalTenancy;
+    const q = c.req.valid("query");
+    const limit = q.limit ?? 30;
+    const jobsScanned = q.jobsScanned ?? 15;
+
+    // Step 1: pick the workspace's most urgent open reqs. Same filter as
+    // GET /v1/signal/jobs (open + has need_date + has state), sorted by
+    // need_date asc so the ranker rewards urgency.
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const jobPredicates = [
+      eq(schema.signalJobs.workspaceId, workspaceId),
+      isNotNull(schema.signalJobs.reqOpenedAt),
+      isNotNull(schema.signalJobs.state),
+      isNotNull(schema.signalJobs.needDate),
+      gte(schema.signalJobs.needDate, todayIso),
+    ];
+    if (q.specialty) jobPredicates.push(eq(schema.signalJobs.specialty, q.specialty));
+    if (q.state) jobPredicates.push(eq(schema.signalJobs.state, q.state));
+
+    const openJobs = await db()
+      .select({
+        id: schema.signalJobs.id,
+        specialty: schema.signalJobs.specialty,
+        state: schema.signalJobs.state,
+        needDate: schema.signalJobs.needDate,
+      })
+      .from(schema.signalJobs)
+      .where(and(...jobPredicates))
+      .orderBy(asc(schema.signalJobs.needDate), desc(schema.signalJobs.reqOpenedAt))
+      .limit(jobsScanned);
+
+    if (openJobs.length === 0) {
+      return c.json({
+        providers: [],
+        total: 0,
+        limit,
+        jobsScanned: 0,
+      });
+    }
+
+    // Step 2: fan out — rank candidates per job. Prefer today's cached
+    // snapshot when it exists; fall back to the live ranker. We only
+    // need (providerId, score, topJobId) so we don't need the full
+    // reasons payload here.
+    const weights = await readWeights({ workspaceId });
+
+    interface Best {
+      providerId: string;
+      score: number;
+      jobId: string;
+      earliestStartDate: string | null;
+    }
+    const bestByProvider = new Map<string, Best>();
+
+    const today = new Date();
+    today.setUTCHours(0, 0, 0, 0);
+
+    for (const job of openJobs) {
+      // Prefer today's snapshot to avoid paying the rank cost twice
+      // when the cockpit already loaded the per-job view.
+      const cached = await db()
+        .select()
+        .from(schema.signalRankings)
+        .where(
+          and(
+            eq(schema.signalRankings.workspaceId, workspaceId),
+            eq(schema.signalRankings.jobId, job.id),
+          ),
+        )
+        .orderBy(desc(schema.signalRankings.rankedAt))
+        .limit(1);
+
+      interface Row {
+        providerId: string;
+        score: number;
+        earliestStartDate: string | null;
+      }
+      let rows: Row[];
+      const snap = cached[0];
+      if (snap && snap.rankedAt.getTime() >= today.getTime()) {
+        rows = snap.entries.map((e) => ({
+          providerId: e.provider_id,
+          score: e.score,
+          // Snapshot JSON does not carry earliest-start; rely on live
+          // run when the brief page needs it.
+          earliestStartDate: null,
+        }));
+      } else {
+        const result = await rankJobCandidates({ workspaceId, jobId: job.id, weights });
+        rows = result.candidates.map((e) => ({
+          providerId: e.providerId,
+          score: e.score,
+          earliestStartDate: e.earliestStartDate,
+        }));
+      }
+
+      for (const row of rows) {
+        const prior = bestByProvider.get(row.providerId);
+        if (!prior || row.score > prior.score) {
+          bestByProvider.set(row.providerId, {
+            providerId: row.providerId,
+            score: row.score,
+            jobId: job.id,
+            earliestStartDate: row.earliestStartDate,
+          });
+        }
+      }
+    }
+
+    if (bestByProvider.size === 0) {
+      return c.json({
+        providers: [],
+        total: 0,
+        limit,
+        jobsScanned: openJobs.length,
+      });
+    }
+
+    // Step 3: enrich — attach provider display rows + license-state
+    // list + last-conversation timestamp + last channel so the FE can
+    // render engagement chips + suggested outreach. All workspace-
+    // scoped joins.
+    const providerIds = Array.from(bestByProvider.keys());
+
+    const providerRows = await db()
+      .select({
+        id: schema.signalProviders.id,
+        name: schema.signalProviders.name,
+        npi: schema.signalProviders.npi,
+        specialties: schema.signalProviders.specialties,
+        regionPrefs: schema.signalProviders.regionPrefs,
+        availabilityHint: schema.signalProviders.availabilityHint,
+      })
+      .from(schema.signalProviders)
+      .where(
+        and(
+          eq(schema.signalProviders.workspaceId, workspaceId),
+          inArray(schema.signalProviders.id, providerIds),
+        ),
+      );
+
+    // License states — one query, grouped in memory. Only `state_license`
+    // rows with a non-null `state` count. Home state comes from the
+    // provider's region_prefs[0] when available, otherwise the first
+    // license state we see.
+    const licRows = await db()
+      .select({
+        providerId: schema.signalCredentials.providerId,
+        state: schema.signalCredentials.state,
+      })
+      .from(schema.signalCredentials)
+      .where(
+        and(
+          eq(schema.signalCredentials.workspaceId, workspaceId),
+          eq(schema.signalCredentials.type, "state_license"),
+          isNotNull(schema.signalCredentials.state),
+          inArray(schema.signalCredentials.providerId, providerIds),
+        ),
+      );
+    const licensesByProvider = new Map<string, string[]>();
+    for (const r of licRows) {
+      if (!r.state) continue;
+      const bucket = licensesByProvider.get(r.providerId) ?? [];
+      if (!bucket.includes(r.state)) bucket.push(r.state);
+      licensesByProvider.set(r.providerId, bucket);
+    }
+
+    // Conversation recency + last channel (per provider). Postgres
+    // DISTINCT ON would be ideal, but Drizzle's SQL builder doesn't
+    // model it cleanly — fetch a wider window and reduce in memory.
+    const convoRows = await db()
+      .select({
+        providerId: schema.signalConversations.providerId,
+        occurredAt: schema.signalConversations.occurredAt,
+        channel: schema.signalConversations.channel,
+      })
+      .from(schema.signalConversations)
+      .where(
+        and(
+          eq(schema.signalConversations.workspaceId, workspaceId),
+          isNotNull(schema.signalConversations.providerId),
+          inArray(schema.signalConversations.providerId, providerIds),
+        ),
+      )
+      .orderBy(desc(schema.signalConversations.occurredAt));
+
+    interface ConvoAgg {
+      lastAt: Date;
+      lastChannel: string;
+      countLast7d: number;
+      countLast14d: number;
+      countLast30d: number;
+      /**
+       * Conversation counts bucketed by calendar month for the last 6
+       * months — index 0 = 5 months ago, index 5 = current month. Used
+       * by the FE sentiment-trend shim so the bar chart renders honest
+       * per-month volumes rather than a flat zero.
+       */
+      monthlyCounts: number[];
+      /** Total conversations observed for this provider (any age). */
+      totalCount: number;
+    }
+    const convoAggByProvider = new Map<string, ConvoAgg>();
+    const now = Date.now();
+    const d7 = 7 * 24 * 60 * 60 * 1000;
+    const d14 = 14 * 24 * 60 * 60 * 1000;
+    const d30 = 30 * 24 * 60 * 60 * 1000;
+    // 6-month calendar anchors. `monthStarts[i]` is the first instant
+    // of the i'th bucket (i=0 oldest, i=5 current). Keep them in UTC
+    // so the bucket boundaries don't shift with the API server's TZ.
+    const nowDate = new Date();
+    const monthStarts: number[] = [];
+    for (let i = 5; i >= 0; i--) {
+      monthStarts.push(
+        Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth() - i, 1, 0, 0, 0, 0),
+      );
+    }
+    const monthEndExclusive = Date.UTC(
+      nowDate.getUTCFullYear(),
+      nowDate.getUTCMonth() + 1,
+      1,
+      0,
+      0,
+      0,
+      0,
+    );
+    for (const r of convoRows) {
+      if (!r.providerId) continue;
+      const agg = convoAggByProvider.get(r.providerId) ?? {
+        lastAt: r.occurredAt,
+        lastChannel: r.channel,
+        countLast7d: 0,
+        countLast14d: 0,
+        countLast30d: 0,
+        monthlyCounts: [0, 0, 0, 0, 0, 0],
+        totalCount: 0,
+      };
+      // First row for this provider (ordered DESC) is the most recent.
+      if (r.occurredAt > agg.lastAt) {
+        agg.lastAt = r.occurredAt;
+        agg.lastChannel = r.channel;
+      }
+      const t = r.occurredAt.getTime();
+      const age = now - t;
+      if (age <= d7) agg.countLast7d += 1;
+      if (age <= d14) agg.countLast14d += 1;
+      if (age <= d30) agg.countLast30d += 1;
+      agg.totalCount += 1;
+      // Month-bucket assignment — only rows inside the 6-month window
+      // land in `monthlyCounts`. Everything older still contributes to
+      // `totalCount` so the FE's confidence-tier count stays honest.
+      const firstMonthStart = monthStarts[0] ?? 0;
+      if (t >= firstMonthStart && t < monthEndExclusive) {
+        let bucket = 0;
+        for (let i = monthStarts.length - 1; i >= 0; i--) {
+          const start = monthStarts[i];
+          if (start !== undefined && t >= start) {
+            bucket = i;
+            break;
+          }
+        }
+        const prev = agg.monthlyCounts[bucket] ?? 0;
+        agg.monthlyCounts[bucket] = prev + 1;
+      }
+      convoAggByProvider.set(r.providerId, agg);
+    }
+
+    function classifyEngagement(
+      agg: ConvoAgg | undefined,
+    ): "warming" | "active" | "cooling" | "dormant" {
+      if (!agg) return "dormant";
+      const ageDays = (now - agg.lastAt.getTime()) / (24 * 60 * 60 * 1000);
+      if (agg.countLast7d >= 2) return "warming";
+      if (ageDays <= 14) return "active";
+      if (ageDays <= 30) return "cooling";
+      return "dormant";
+    }
+
+    // Step 4: compose output rows + optional engagement filter.
+    interface OutRow {
+      id: string;
+      name: string;
+      npi: string | null;
+      specialty: string;
+      subSpecialty: string | null;
+      /**
+       * Match score as a 0-100 INTEGER percent. The raw ranker score
+       * (sum of weighted facet points, ~0-50 in practice) is clamped
+       * and rounded here so the FE's chip can just append `%` without
+       * additional math — see the first-dogfood "2400%" bug.
+       */
+      matchScore: number;
+      homeState: string | null;
+      licenseStates: string[];
+      lastConversationAt: string | null;
+      bestChannel: string | null;
+      engagement: "warming" | "active" | "cooling" | "dormant";
+      /** Count of conversations per calendar month, last 6 (oldest→newest). */
+      monthlyConversationCounts: number[];
+      /** Total conversations observed across all history. */
+      conversationCount: number;
+      topJobId: string;
+      earliestStartDate: string | null;
+    }
+    const providerRowById = new Map(providerRows.map((p) => [p.id, p]));
+    const out: OutRow[] = [];
+    for (const [providerId, best] of bestByProvider) {
+      const provider = providerRowById.get(providerId);
+      if (!provider) continue;
+      const licenseStates = licensesByProvider.get(providerId) ?? [];
+      const specialtiesArr = provider.specialties ?? [];
+      const specialty = specialtiesArr[0] ?? "Anesthesia";
+      const subSpecialty = specialtiesArr[1] ?? null;
+      const regionPrefs = provider.regionPrefs ?? [];
+      const homeState = regionPrefs[0] ?? licenseStates[0] ?? null;
+      const convoAgg = convoAggByProvider.get(providerId);
+      const engagement = classifyEngagement(convoAgg);
+
+      if (q.engagement && q.engagement !== engagement) continue;
+
+      out.push({
+        id: providerId,
+        name: provider.name,
+        npi: provider.npi,
+        specialty,
+        subSpecialty,
+        // Raw ranker score → 0-100 integer percent. Clamp first, then
+        // round so a near-zero negative (post-mismatch penalty) lands
+        // on 0% and anything above the practical ~50 cap still shows
+        // as 100% rather than wrapping.
+        matchScore: Math.max(0, Math.min(100, Math.round(best.score))),
+        homeState,
+        licenseStates,
+        lastConversationAt: convoAgg ? convoAgg.lastAt.toISOString() : null,
+        bestChannel: convoAgg ? convoAgg.lastChannel : null,
+        engagement,
+        monthlyConversationCounts: convoAgg ? convoAgg.monthlyCounts.slice() : [0, 0, 0, 0, 0, 0],
+        conversationCount: convoAgg ? convoAgg.totalCount : 0,
+        topJobId: best.jobId,
+        earliestStartDate: best.earliestStartDate,
+      });
+    }
+
+    // Final sort: match score desc, then name asc for stable rows.
+    out.sort((a, b) => {
+      if (b.matchScore !== a.matchScore) return b.matchScore - a.matchScore;
+      return a.name.localeCompare(b.name);
+    });
+
+    const total = out.length;
+    const sliced = out.slice(0, limit);
+
+    return c.json({
+      providers: sliced,
+      total,
+      limit,
+      jobsScanned: openJobs.length,
+    });
+  },
+);
+
+// ─── GET /v1/signal/jobs/:id/ranking ───────────────────────────────────────
+//
+// Rank the providers in the current workspace against this job and
+// snapshot the result into `signal_rankings`. The caller gets the
+// freshly-computed list — not a cached one — so a recruiter who just
+// edited a provider sees the effect immediately.
+//
+// Cache key is (workspace_id, job_id, YYYY-MM-DD(ranked_at)). The
+// handler accepts `?fresh=1` to force a new ranking even if today's
+// snapshot already exists; default is to prefer today's snapshot when
+// it's still fresh.
+signalRoutes.get("/v1/signal/jobs/:id/ranking", async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const jobId = c.req.param("id");
+  const fresh = c.req.query("fresh") === "1";
+
+  const scoped = withWorkspace(workspaceId);
+  const job = await scoped.jobs.findById(jobId);
+  if (!job) return notFound(c);
+
+  // Prefer today's snapshot unless the caller explicitly asked for a
+  // fresh run. "Today" is UTC-date by rankedAt — see cache-key notes
+  // in signal-match/src/rank.ts.
+  if (!fresh) {
+    const todayUtc = new Date();
+    todayUtc.setUTCHours(0, 0, 0, 0);
+    const cached = await db()
+      .select()
+      .from(schema.signalRankings)
+      .where(
+        and(
+          eq(schema.signalRankings.workspaceId, workspaceId),
+          eq(schema.signalRankings.jobId, jobId),
+        ),
+      )
+      .orderBy(desc(schema.signalRankings.rankedAt))
+      .limit(1);
+    const row = cached[0];
+    if (row && row.rankedAt.getTime() >= todayUtc.getTime()) {
+      return c.json({
+        jobId: row.jobId,
+        rankingId: row.id,
+        rankedAt: row.rankedAt.toISOString(),
+        cached: true,
+        candidates: row.entries,
+      });
+    }
+  }
+
+  const weights = await readWeights({ workspaceId });
+  const result = await rankJobCandidates({ workspaceId, jobId, weights });
+
+  return c.json({
+    jobId,
+    rankingId: result.rankingId,
+    rankedAt: result.rankedAt.toISOString(),
+    cached: false,
+    candidates: result.candidates.map((c2) => ({
+      providerId: c2.providerId,
+      score: c2.score,
+      earliestStartDate: c2.earliestStartDate,
+      confidence: c2.confidence,
+      bindingCredential: c2.bindingCredential,
+      reasons: c2.reasons.map((r) => ({
+        code: r.facet.facet,
+        facet: r.facet,
+        humanPhrasing: r.humanPhrasing,
+        sourceLineage: {
+          table: r.sourceLineageRef.canonicalTable,
+          rowId: r.sourceLineageRef.canonicalId,
+        },
+      })),
+    })),
+  });
+});
+
+// ─── GET /v1/signal/providers/:id/fit ──────────────────────────────────────
+//
+// Reverse query: openings this provider is a fit for. Does NOT write a
+// per-provider snapshot (see signal-match/src/reverse.ts for why).
+signalRoutes.get("/v1/signal/providers/:id/fit", async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const providerId = c.req.param("id");
+
+  const scoped = withWorkspace(workspaceId);
+  const provider = await scoped.providers.findById(providerId);
+  if (!provider) return notFound(c);
+
+  const weights = await readWeights({ workspaceId });
+  const result = await rankProviderOpenings({ workspaceId, providerId, weights });
+
+  return c.json({
+    providerId,
+    openings: result.openings.map((o) => ({
+      jobId: o.jobId,
+      score: o.score,
+      earliestStartDate: o.earliestStartDate,
+      confidence: o.confidence,
+      bindingCredential: o.bindingCredential,
+      reasons: o.reasons.map((r) => ({
+        code: r.facet.facet,
+        facet: r.facet,
+        humanPhrasing: r.humanPhrasing,
+        sourceLineage: {
+          table: r.sourceLineageRef.canonicalTable,
+          rowId: r.sourceLineageRef.canonicalId,
+        },
+      })),
+    })),
+  });
+});
+
+// ─── POST /v1/signal/overrides ────────────────────────────────────────────
+//
+// Recruiter promote/demote. Idempotent per (workspace, job, provider,
+// recruiter). A POST that hits an existing row updates direction +
+// reason + at; no new row is inserted. Captured for the learn worker
+// so repeated nudges on the same candidate don't skew the weight more
+// than a single decision would.
+const OverrideBody = z.object({
+  jobId: z.string().uuid(),
+  providerId: z.string().uuid(),
+  direction: z.enum(["pin", "unpin", "promote", "demote"]),
+  reason: z.string().min(1).max(500),
+});
+
+signalRoutes.post("/v1/signal/overrides", zValidator("json", OverrideBody), async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const auth = c.var.auth;
+  if (!auth) return unauthorized(c);
+  const userId = auth.session.kind === "staff" ? auth.session.userId : null;
+  const body = c.req.valid("json");
+
+  const scoped = withWorkspace(workspaceId);
+  const [job, provider] = await Promise.all([
+    scoped.jobs.findById(body.jobId),
+    scoped.providers.findById(body.providerId),
+  ]);
+  if (!job || !provider) return notFound(c);
+
+  // Idempotency key is (workspace, job, provider, user). We implement
+  // it in two steps rather than via `ON CONFLICT` because the base
+  // table has no partial unique index on this tuple — adding one here
+  // would ship a migration for a case the ranker can police in-line.
+  const existing = await db()
+    .select()
+    .from(schema.signalOverrides)
+    .where(
+      and(
+        eq(schema.signalOverrides.workspaceId, workspaceId),
+        eq(schema.signalOverrides.jobId, body.jobId),
+        eq(schema.signalOverrides.providerId, body.providerId),
+        userId
+          ? eq(schema.signalOverrides.userId, userId)
+          : // `userId IS NULL` branch — a provider-session override.
+            eq(schema.signalOverrides.userId, schema.signalOverrides.userId),
+      ),
+    )
+    .limit(1);
+
+  const now = new Date();
+  let overrideId: string;
+  let created: boolean;
+  const prior = existing[0];
+  if (prior && (userId === null || prior.userId === userId)) {
+    await db()
+      .update(schema.signalOverrides)
+      .set({ direction: body.direction, reasonText: body.reason, at: now })
+      .where(eq(schema.signalOverrides.id, prior.id));
+    overrideId = prior.id;
+    created = false;
+  } else {
+    const [row] = await scoped.overrides.insert({
+      jobId: body.jobId,
+      providerId: body.providerId,
+      userId: userId ?? null,
+      direction: body.direction,
+      reasonText: body.reason,
+      at: now,
+    });
+    if (!row) {
+      logger.error({ workspaceId, body }, "signal_override_insert_returned_no_row");
+      return c.json(
+        {
+          type: "about:blank",
+          title: "Failed to record override",
+          status: 500,
+          instance: c.var.requestId,
+        },
+        500,
+      );
+    }
+    overrideId = row.id;
+    created = true;
+  }
+
+  return c.json(
+    {
+      overrideId,
+      jobId: body.jobId,
+      providerId: body.providerId,
+      direction: body.direction,
+      reason: body.reason,
+      at: now.toISOString(),
+      created,
+    },
+    created ? 201 : 200,
+  );
+});
+
+// ─── GET /v1/signal/reasons/:reason_id/source ─────────────────────────────
+//
+// Deep-link resolver. `reason_id` is a composite key the ranker returns
+// inside each reason: `{table}:{rowId}`. We look that up in
+// `signal_source_lineage` and return every external-system entry so the
+// cockpit can render "pulled from inbound_emails/<uuid>" and route to
+// the originating record.
+signalRoutes.get("/v1/signal/reasons/:reason_id/source", async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const raw = c.req.param("reason_id");
+  // Compact form "table:rowId" keeps the URL short and lets the FE
+  // thread the pair through a single path segment. A UUID in isolation
+  // is unresolvable here — we always need both halves.
+  const parts = raw.split(":");
+  if (parts.length !== 2) {
+    return c.json(
+      {
+        type: "about:blank",
+        title: "Bad reason id",
+        status: 400,
+        detail: "Expected reason_id of the form '<table>:<uuid>'.",
+        instance: c.var.requestId,
+      },
+      400,
+    );
+  }
+  const [canonicalTable, canonicalId] = parts as [string, string];
+
+  const lineageRows = await lineageForCanonical(db(), {
+    workspaceId,
+    canonicalTable,
+    canonicalId,
+  });
+  if (lineageRows.length === 0) return notFound(c);
+
+  return c.json({
+    canonicalTable,
+    canonicalId,
+    sources: lineageRows.map((r) => ({
+      id: r.id,
+      externalSystem: r.externalSystem,
+      externalId: r.externalId,
+      canonicalTable: r.canonicalTable,
+      canonicalId: r.canonicalId,
+      lastSynced: r.lastSynced.toISOString(),
+    })),
+  });
+});
+
+// ─── POST /v1/signal/conversations/consent ────────────────────────────────
+//
+// Consent state update (grant / revoke / move to pending / clear).
+// The state machine itself lives in `@cred/db/signal` (consent.ts) so
+// the ranker and the ingest pipeline see the same rules — this
+// handler is a thin surface over it.
+//
+// Rules the surface enforces:
+//
+//   - `implied_outbound` rows are frozen (ingest-only). The handler
+//     refuses to flip them; see `validateConsentTransition`.
+//   - The addressable target set excludes `implied_outbound` for the
+//     same reason — there is no consent event that moves a row INTO
+//     that state from outside ingest.
+//   - On a successful `revoked` transition, we also null the body
+//     column so the stored copy of the content vanishes; occurred_at,
+//     channel, and lineage stay so audit can still show "a thread
+//     existed here, these were the headers, the body is gone". The
+//     ranker's extract-filter (see `extractsForWorkspace`) joins back
+//     to the conversation's consent_state, so no extra write to
+//     `signal_extracts` is needed here.
+const ConsentBody = z.object({
+  conversationId: z.string().uuid(),
+  // Mirror of `ConsentApiTarget` in @cred/db/signal. The type-level
+  // assertion below fails the build if the two drift.
+  state: z.enum(["granted", "revoked", "pending", "unknown"]),
+});
+// Compile-time guard: the Zod enum equals the state machine's
+// addressable target set. If `ConsentApiTarget` grows a new member
+// the TS error here forces us to teach the Zod enum.
+type _ConsentApiTargetsMatch = ConsentApiTarget extends z.infer<typeof ConsentBody>["state"]
+  ? z.infer<typeof ConsentBody>["state"] extends ConsentApiTarget
+    ? true
+    : never
+  : never;
+const _consentApiTargetsMatch: _ConsentApiTargetsMatch = true;
+void _consentApiTargetsMatch;
+
+signalRoutes.post(
+  "/v1/signal/conversations/consent",
+  zValidator("json", ConsentBody),
+  async (c) => {
+    const { workspaceId } = c.var.signalTenancy;
+    const body = c.req.valid("json");
+    const nextState = body.state;
+
+    // Load the current state first so the transition check can act on
+    // it. A single row lookup → keeps us on one round-trip + one
+    // conditional update when the transition is legal.
+    const existing = await db()
+      .select({
+        id: schema.signalConversations.id,
+        consentState: schema.signalConversations.consentState,
+      })
+      .from(schema.signalConversations)
+      .where(
+        and(
+          eq(schema.signalConversations.workspaceId, workspaceId),
+          eq(schema.signalConversations.id, body.conversationId),
+        ),
+      )
+      .limit(1);
+    const prior = existing[0];
+    if (!prior) return notFound(c);
+
+    const err = validateConsentTransition(prior.consentState, nextState);
+    if (err) {
+      return c.json(
+        {
+          type: `https://errors.cred/signal/consent/${err.code}`,
+          title: "Consent transition refused",
+          status: 409,
+          detail: err.detail,
+          instance: c.var.requestId,
+        },
+        409,
+      );
+    }
+
+    // Revoke → null the body as part of the same write. Non-revoked
+    // transitions leave the body untouched.
+    const setExpr: Partial<typeof schema.signalConversations.$inferInsert> = {
+      consentState: nextState,
+    };
+    if (nextState === "revoked") setExpr.body = null;
+
+    const updated = await db()
+      .update(schema.signalConversations)
+      .set(setExpr)
+      .where(
+        and(
+          eq(schema.signalConversations.workspaceId, workspaceId),
+          eq(schema.signalConversations.id, body.conversationId),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (!row) return notFound(c);
+
+    return c.json({
+      conversationId: row.id,
+      consentState: row.consentState,
+      bodyPresent: row.body !== null,
+    });
+  },
+);
+
+// ─── POST /v1/signal/eval/runs ────────────────────────────────────────────
+//
+// Eval harness execution. The route:
+//
+//   1. Records an audit `signal_conversations` row of channel="eval"
+//      (same shape WS A's stub shipped, so existing drainers still see
+//      it).
+//   2. Loads the committed v0 fixture (or a caller-supplied fixture
+//      path when the request body names one), seeds the current
+//      workspace, runs the harness, writes the report into a
+//      `signal_eval_runs` row, and returns the aggregate.
+//
+// Seeding into a live workspace is irreversible — we gate the route
+// on `allowSeeding: true` in the body so a cockpit user can't nuke a
+// real workspace's providers by accident. The intended caller is the
+// dev workspace `roster-hc-beta`, same as the CI eval run.
+//
+// Fixture label-source clarity: when a placeholder fixture is used,
+// we write `label_source = "placeholder-engineering-judgment"` into
+// the row so later reads know this run is NOT consultant-grade.
+const EvalBody = z.object({
+  suite: z.string().min(1).max(200),
+  notes: z.string().max(2000).optional(),
+  /** Absolute path to a fixture JSON on the API server. Defaults to the v0 fixture. */
+  fixturePath: z.string().max(2048).optional(),
+  k: z.number().int().min(1).max(50).optional(),
+  /** Explicit opt-in to SEED the workspace with fixture data. Default false (dry report). */
+  allowSeeding: z.boolean().optional(),
+});
+
+signalRoutes.post("/v1/signal/eval/runs", zValidator("json", EvalBody), async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const body = c.req.valid("json");
+
+  // 1. Audit conversation row (same as WS A's stub).
+  const [conversationRow] = await db()
+    .insert(schema.signalConversations)
+    .values({
+      workspaceId,
+      channel: "eval",
+      consentState: "unknown",
+      summary: `eval:${body.suite}`,
+      sourceRef: {
+        kind: "eval_request",
+        suite: body.suite,
+        ...(body.notes ? { notes: body.notes } : {}),
+      },
+    })
+    .returning();
+
+  if (!body.allowSeeding) {
+    // Without opt-in we DO NOT touch the workspace's rows. The caller
+    // gets the conversation id back so they can wire their own drainer.
+    return c.json(
+      {
+        runId: conversationRow?.id ?? null,
+        suite: body.suite,
+        status: "queued",
+        message:
+          "Set allowSeeding: true to run the harness synchronously. Without it the route stays an enqueue-only audit trail.",
+      },
+      202,
+    );
+  }
+
+  // 2. Drain: load fixture, seed, run harness, persist report.
+  const fixturePath = body.fixturePath ?? DEFAULT_EVAL_FIXTURE_PATH;
+  const fixture = loadFixture(fixturePath);
+  const startedAt = new Date();
+  const result = await runEval({
+    workspaceId,
+    fixture,
+    ...(body.k !== undefined ? { k: body.k } : {}),
+  });
+  const completedAt = new Date();
+
+  const [evalRow] = await db()
+    .insert(schema.signalEvalRuns)
+    .values({
+      workspaceId,
+      conversationId: conversationRow?.id ?? null,
+      suite: body.suite,
+      fixture: fixturePath,
+      labelSource: result.labelSource,
+      k: result.k,
+      status: "completed",
+      meanPrecisionAtK: result.aggregate.meanPrecisionAtK.toFixed(4),
+      passedCount: result.aggregate.passedCount,
+      failedCount: result.aggregate.failedCount,
+      aggregate: {
+        meanPrecisionAtK: result.aggregate.meanPrecisionAtK,
+        passedCount: result.aggregate.passedCount,
+        failedCount: result.aggregate.failedCount,
+      },
+      perReq: result.perReq.map((r) => ({
+        reqId: r.reqId,
+        precisionAtK: r.precisionAtK,
+        rankerTop: r.rankerTop,
+        expectedTop: r.expectedTop,
+        hits: r.hits,
+        misses: r.misses,
+        reasonsMatched: r.reasonsMatched,
+      })),
+      startedAt,
+      completedAt,
+    })
+    .returning();
+
+  return c.json(
+    {
+      runId: evalRow?.id ?? null,
+      conversationId: conversationRow?.id ?? null,
+      suite: body.suite,
+      status: "completed",
+      fixture: fixturePath,
+      labelSource: result.labelSource,
+      isPlaceholder: result.isPlaceholder,
+      k: result.k,
+      aggregate: result.aggregate,
+      startedAt: startedAt.toISOString(),
+      completedAt: completedAt.toISOString(),
+    },
+    201,
+  );
+});
+
+// ─── POST /v1/signal/extracts/run ─────────────────────────────────────────
+//
+// Dev trigger for the extract pipeline. In prod WS G will run this on
+// an hourly cron (not yet wired — see WS E deliverables doc), so for
+// now a recruiter can hit this endpoint to re-extract after a batch
+// of outreach. The handler returns the extract summary so the cockpit
+// can show "+N facets written" immediately.
+//
+// Idempotent: a re-run against unchanged conversation bodies inserts
+// zero rows (the migration adds a partial unique index on
+// (conversation_id, facet, source_span.start) that the runner relies
+// on via ON CONFLICT DO NOTHING).
+signalRoutes.post("/v1/signal/extracts/run", async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const result = await runExtracts({ workspaceId });
+  return c.json({
+    workspaceId,
+    conversationsProcessed: result.conversationsProcessed,
+    extractsInserted: result.extractsInserted,
+    extractsSkipped: result.extractsSkipped,
+    bodiesHidden: result.bodiesHidden,
+  });
+});
+
+// ─── POST /v1/signal/ingest/:adapter/webhook ──────────────────────────────
+//
+// HMAC-validated ingress. The adapter name is a free-form string that
+// maps to an env-supplied secret (`SIGNAL_INGEST_<ADAPTER>_SECRET`,
+// upper-cased). When no secret is configured the request is rejected
+// with 401 — the stub explicitly does NOT short-circuit as "anyone can
+// post" because turning that into prod behaviour is a one-flag flip.
+//
+// Tenant resolution: for v0 we trust the session that reached the
+// kill-switch's workspace check. An adapter-side credential-to-tenant
+// map is a follow-up; the config surface for that lives in WS H.
+signalRoutes.post("/v1/signal/ingest/:adapter/webhook", async (c) => {
+  const { workspaceId } = c.var.signalTenancy;
+  const adapter = c.req.param("adapter");
+  const signature = c.req.header("x-signal-signature");
+
+  const rawBody = await c.req.text();
+
+  const envKey = `SIGNAL_INGEST_${adapter.toUpperCase().replace(/[^A-Z0-9_]/g, "_")}_SECRET`;
+  const secret = process.env[envKey];
+  if (!secret) {
+    // Adapter has no secret wired — refuse to accept the event. This
+    // protects against the "forgot to configure the HMAC" footgun that
+    // would otherwise land unauthenticated webhook traffic in Signal.
+    return c.json(
+      {
+        type: "https://errors.cred/signal/ingest_adapter_not_configured",
+        title: `Ingest adapter '${adapter}' has no HMAC secret configured`,
+        status: 401,
+        instance: c.var.requestId,
+      },
+      401,
+    );
+  }
+  if (!signature || !(await verifyHmac(rawBody, secret, signature))) {
+    return c.json(
+      {
+        type: "about:blank",
+        title: "Invalid HMAC signature",
+        status: 401,
+        instance: c.var.requestId,
+      },
+      401,
+    );
+  }
+
+  // Minimal payload shape — we accept a free-form payload so adapter
+  // owners can start sending today and the ingestion pipeline (WS C)
+  // can iterate the shape without invalidating the HMAC path.
+  let parsedBody: unknown;
+  try {
+    parsedBody = rawBody.length > 0 ? JSON.parse(rawBody) : {};
+  } catch {
+    return c.json(
+      {
+        type: "about:blank",
+        title: "Body is not valid JSON",
+        status: 400,
+        instance: c.var.requestId,
+      },
+      400,
+    );
+  }
+
+  const [row] = await db()
+    .insert(schema.signalConversations)
+    .values({
+      workspaceId,
+      channel: `ingest:${adapter}`,
+      consentState: "unknown",
+      summary: `ingest ${adapter}`,
+      sourceRef: {
+        adapter,
+        payload: parsedBody as Record<string, unknown>,
+      },
+    })
+    .returning();
+
+  if (!row) {
+    logger.error({ workspaceId, adapter }, "signal_ingest_conversation_insert_returned_no_row");
+    return c.json(
+      {
+        type: "about:blank",
+        title: "Failed to record ingest",
+        status: 500,
+        instance: c.var.requestId,
+      },
+      500,
+    );
+  }
+
+  // Record lineage back to the adapter's own id (falling back to a
+  // random one so the row is still queryable by its `signal_source_
+  // lineage.external_id`).
+  const externalId =
+    typeof (parsedBody as { id?: unknown })?.id === "string"
+      ? (parsedBody as { id: string }).id
+      : randomUUID();
+  await recordLineage(db(), {
+    workspaceId,
+    canonicalTable: "signal_conversations",
+    canonicalId: row.id,
+    externalSystem: adapter,
+    externalId,
+  });
+
+  return c.json({ conversationId: row.id, accepted: true }, 202);
+});
+
+/**
+ * Timing-safe HMAC-SHA256 verification.
+ *
+ * Accepts both plain hex and `sha256=<hex>` prefixed signatures so the
+ * same handler works with GitHub-style and Stripe-style adapters out
+ * of the box.
+ */
+async function verifyHmac(payload: string, secret: string, signature: string): Promise<boolean> {
+  // `crypto.subtle` lives on globalThis in modern Node; we call into it
+  // via a dynamic import to keep this module tree-shakeable for test
+  // bundlers that don't like unconditional node:crypto imports.
+  const { createHmac, timingSafeEqual } = await import("node:crypto");
+  const normalized = signature.startsWith("sha256=")
+    ? signature.slice("sha256=".length)
+    : signature;
+  if (!/^[0-9a-f]+$/i.test(normalized) || normalized.length % 2 !== 0) return false;
+  const expected = createHmac("sha256", secret).update(payload, "utf8").digest("hex");
+  const a = Buffer.from(expected, "hex");
+  const b = Buffer.from(normalized, "hex");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}

@@ -1,0 +1,36 @@
+{
+  "name": "@cred/signal-ingest",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapters": "./src/adapters/types.ts",
+    "./adapters/contract": "./src/adapters/contract.ts",
+    "./adapters/registry": "./src/adapters/registry.ts",
+    "./readers": "./src/readers/index.ts",
+    "./runner": "./src/runner.ts",
+    "./scheduler": "./src/scheduler.ts",
+    "./gaps": "./src/gaps.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@cred/db": "workspace:*",
+    "@cred/observability": "workspace:*",
+    "@cred/signal-core": "workspace:*",
+    "@cred/signal-cred-bridge": "workspace:*",
+    "@cred/signal-extracts": "workspace:*",
+    "drizzle-orm": "0.36.4",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "postgres": "3.4.5",
+    "typescript": "5.7.2",
+    "vitest": "2.1.8"
+  }
+}

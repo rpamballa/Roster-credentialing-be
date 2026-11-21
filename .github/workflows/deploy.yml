@@ -43,8 +43,51 @@ env:
   DEPLOY_DIR_ON_VM: /opt/roster
 
 jobs:
+  # Signal is dev-only until the eval harness passes with consultant-
+  # labeled data (see implementation plan section 8). This job is the
+  # canary that catches any attempt to deploy a Signal service to prod
+  # before SIGNAL_PROD_UNLOCKED has been set.
+  #
+  # It runs BEFORE `build`, so a protected Signal change never produces
+  # an image to push. The gate is intentionally scoped by image name:
+  # `signal-*` matches the future `signal-api`, `signal-worker`, etc.
+  # The current `api`/`worker` images are unaffected.
+  #
+  # To unlock: set the repo variable `SIGNAL_PROD_UNLOCKED=true` under
+  # Settings → Secrets and variables → Actions → Variables. There is no
+  # per-run override — flipping that variable is the explicit, auditable
+  # step that opens Signal to prod.
+  signal-prod-gate:
+    name: refuse signal-* services on prod without unlock
+    runs-on: ubuntu-latest
+    steps:
+      - name: check SIGNAL_PROD_UNLOCKED when deploying signal-* services
+        env:
+          # Image name from the workflow-level env. Today this is a
+          # single string (`api`); the check scans it for the `signal-`
+          # prefix so adding signal-* images later to the same workflow
+          # is caught automatically. Reading via toJSON keeps multi-
+          # image refactors (array form) honest too.
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          UNLOCKED: ${{ vars.SIGNAL_PROD_UNLOCKED }}
+        run: |
+          set -euo pipefail
+          # Match any image tagged `signal-...`. When this workflow is
+          # extended to build/deploy multiple images, replicate the
+          # check against each one; today IMAGE_NAME is a scalar string.
+          if printf '%s\n' "${IMAGE_NAME}" | grep -qE '(^|[[:space:],])signal-'; then
+            if [ "${UNLOCKED:-}" != "true" ]; then
+              echo "::error::Signal services are dev-only until SIGNAL_PROD_UNLOCKED is set. See implementation plan section 8."
+              exit 1
+            fi
+            echo "::notice::SIGNAL_PROD_UNLOCKED=true — signal-* prod deploys are enabled."
+          else
+            echo "No signal-* service in this deploy — gate passes."
+          fi
+
   build:
     name: build + push image
+    needs: signal-prod-gate
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.meta.outputs.sha }}
